@@ -11,6 +11,8 @@
   },
   "files": [
     "src",
+    "!src/runtime.log",
+    "!src/core/_engine_base_*",
     "weiwen-law.patch.yml",
     "README.md",
     "DESIGN.md",
