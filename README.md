@@ -82,16 +82,16 @@ node examples/demo-tool-loop.mjs
 
 ## 挂到 DSH（生产挂载）
 
-把 `weiwen-law.patch.yml` 作为 overlay 接入你的 DSH profile（具体路径以你的 DSH 版本为准，详见 [`DESIGN.md`](./DESIGN.md) 的挂载章节）。接入后，运行在该 profile 的 Agent 自动获得 6 个白箱工具。
+把 `weiwen-law.patch.yml` 作为 overlay 接入你的 DSH profile（具体路径以你的 DSH 版本为准，详见 [`DESIGN.md`](./DESIGN.md) 的挂载章节）。接入后，运行在该 profile 的 Agent 自动获得 11 个白箱工具。
 
-> 注：原生挂载的精确 profile 路径随 DSH 版本变化；本仓库已通过实跑验证插件可被 DSH 加载、6 工具全部注册。如官方 API 有变更，以官方 docs 当前版本为准核对。
+> 注：原生挂载的精确 profile 路径随 DSH 版本变化；本仓库已通过实跑验证插件可被 DSH 加载、11 工具全部注册。如官方 API 有变更，以官方 docs 当前版本为准核对。
 
 ## 模型怎么调用（给 AI 工程师）
 
-> **白话版**：插件向 DSH 注册 6 个白箱工具，模型像调普通函数一样调用它们来**自查边界**；同时挂了 3 道硬性闸门（2 道拦动作/步、1 道拦回执）+ 1 个只读审计钩子。
+> **白话版**：插件向 DSH 注册 11 个白箱工具，模型像调普通函数一样调用它们来**自查边界**；同时挂了 3 道硬性闸门（2 道拦动作/步、1 道拦回执）+ 1 个只读审计钩子。
 > **专业版**：节选自 `src/index.js`（完整代码见仓库），见下方代码块。
 
-### 6 个白箱工具（真实注册名）
+### 11 个白箱工具（真实注册名）
 
 | 工具 | 模型调它做什么 |
 |---|---|
@@ -101,6 +101,11 @@ node examples/demo-tool-loop.mjs
 | `query_conduction_chain` | 拿传导链与框架结构 |
 | `query_boundary` | 查内 H 边界（本插件不读不写主体性黑箱） |
 | `query_bugstop` | 查第一 Bug 停机闭环状态：哪些故障环节已停未修复、缺失步骤（反推/溯源/修复），白箱观测闭环是否闭合 |
+| `query_anchor_channel` | 锚源自报：结构入口（宿主声明的任务范围）是否接通、锚池里有什么；窗口面只是观察面，**永不授权** |
+| `query_criterion_wiring` | 判据接线自查：每条判据走的是哪条路（进计算 / 只读面 / 零引用），把「在不在场」与「被不被调用」分开 |
+| `query_strata` | 分层读数：层别定位（同一形态在不同层不能串判） |
+| `query_nested` | 四层嵌套读数（R/S/D/H 的宏观与微观形态、服从关系、展开终止判据） |
+| `query_tension` | S↔D 张力读数：三档路由（有容差算跨距 / 只有条款出缺口清单 / 都拿不到则不判）、H 在张力上的位置形态、H 的四个面向与公式准入律 |
 
 ### 3 道硬性闸门（hooks）+ 1 个只读审计钩子
 
@@ -160,7 +165,7 @@ export function apply(ctx) {
   //    契约是 (exec, result) —— 从第一个参数上读 error 会让失败入账静默失效。
   ctx.on('tools/result', (exec, result) => { if (result?.error) engine.onFailure(); });
 
-  // ⑤ 6 个白箱自查工具（节选其一，其余同构）
+  // ⑤ 11 个白箱自查工具（节选其一，其余同构）
   ctx.tools.register(defineTool({
     name: 'query_iron_laws',
     description: '返回三大铁律的定稿文本（不可变）',
@@ -172,14 +177,14 @@ export function apply(ctx) {
 }
 ```
 
-> 完整实现（含 6 个工具的 `execute` 细节、运行日志、引擎裁决逻辑）见仓库 `src/index.js`。
+> 完整实现（含 11 个工具的 `execute` 细节、运行日志、引擎裁决逻辑）见仓库 `src/index.js`。
 
 ## 结构
 
 ```
 package.json          # dsh 字段声明 bundle
 weiwen-law.patch.yml  # 挂载补丁（headless profile overlay）
-src/index.js          # 插件入口：钩子 + 6 个白箱自查工具
+src/index.js          # 插件入口：钩子 + 11 个白箱自查工具
 src/core/law.mjs      # 框架定义常量（详见基础版仓库，本仓不展开推导）
 src/core/engine.mjs   # 纯逻辑裁决引擎（零 DSH 依赖，可单测）
 test/                 # 单元测试 + 真实案例测试 + 对齐回归（`npm test` 全绿）
@@ -201,7 +206,7 @@ DESIGN.md             # 架构设计（映射表 / 风险 / 使用流程 / 挂�
 - Node.js `^22.19 || >=24`（dsh 硬性要求，奇数版本不支持）
 - DeepSeek API Key（或其他 OpenAI 兼容端点的 Key）
 - dsh 当前为开发者预览版（v0.1.x），官方提示后续存在破坏性 API 变更；生产环境请锁定具体版本
-- **兼容声明**：本插件验证于 DSH v0.1.x —— 真机实测（2026-08-19 与 2026-09-21：6 个白箱工具注册；3 道硬性闸门 + 1 个只读审计钩子端到端工作，回执闸门在一次真实失败调用上实测拦下，并把回执断成纠错回执）；mainline 快速演进中，接入前请以官方文档当前版本复核（挂载细节见 DESIGN.md）。
+- **兼容声明**：本插件验证于 DSH v0.1.x —— 真机实测（2026-08-19 与 2026-09-21：当时注册 6 个白箱工具；2026-10 增补至 11 个，新增 `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension`；3 道硬性闸门 + 1 个只读审计钩子端到端工作，回执闸门在一次真实失败调用上实测拦下，并把回执断成纠错回执）；mainline 快速演进中，接入前请以官方文档当前版本复核（挂载细节见 DESIGN.md）。
 
 ### 方式一：npx 快速启动（推荐先体验）
 
@@ -231,7 +236,7 @@ export DEEPSEEK_API_KEY=sk-xxxx     # Linux/macOS
 #    $env:DEEPSEEK_API_KEY="sk-xxxx" # Windows PowerShell
 ```
 
-挂载后，运行在该 profile 的 Agent 自动获得 6 个白箱自查工具（`query_iron_laws` / `query_steady_state` / `list_rigid_anchors` / `query_conduction_chain` / `query_boundary` / `query_bugstop`），并在工具调用前经过 `tools/pre-execute` 硬性护栏闸门（R/D/S/H/M 总裁决）与 `agent/pre-step` 内 H 不可侵闸门；工具失败的回执还要过 `tools/post-execute` 回执闸门（D 破窗止损：偏离累积达阈值时把故障回执就地断成纠错回执，断点落在回执上）。
+挂载后，运行在该 profile 的 Agent 自动获得 11 个白箱自查工具（`query_iron_laws` / `query_steady_state` / `list_rigid_anchors` / `query_conduction_chain` / `query_boundary` / `query_bugstop` / `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension`），并在工具调用前经过 `tools/pre-execute` 硬性护栏闸门（R/D/S/H/M 总裁决）与 `agent/pre-step` 内 H 不可侵闸门；工具失败的回执还要过 `tools/post-execute` 回执闸门（D 破窗止损：偏离累积达阈值时把故障回执就地断成纠错回执，断点落在回执上）。
 
 ### 方式三：一行命令安装（官方 dsh plugin 机制，推荐）
 
@@ -248,13 +253,13 @@ dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
 dsh --profile web
 ```
 
-装完后在 `设置 → 插件 → 插件列表` 可见 `weiwen-law` 状态为"已启用"；Agent 自动获得 6 个白箱自查工具 + 3 道硬性闸门（`tools/pre-execute` / `agent/pre-step` / `tools/post-execute`）+ 1 个只读审计钩子（`tools/result`）。
+装完后在 `设置 → 插件 → 插件列表` 可见 `weiwen-law` 状态为"已启用"；Agent 自动获得 11 个白箱自查工具 + 3 道硬性闸门（`tools/pre-execute` / `agent/pre-step` / `tools/post-execute`）+ 1 个只读审计钩子（`tools/result`）。
 
 ### 卸载
 
 - **方式三安装的**（官方 plugin 机制）：`dsh plugin --profile web remove dsh-weiwen-law`，重启生效。
 - **方式二 overlay 挂载的**：从 dsh 启动配置（cordis.yml 的 plugins 列表或 `--patch` 参数）移除 `weiwen-law.patch.yml` 引用，重启生效。
-- 移除后 Agent 不再获得 6 个白箱自查工具，也不再有 3 道硬性闸门与审计钩子；插件本身不写持久状态，卸载即干净。
+- 移除后 Agent 不再获得 11 个白箱自查工具，也不再有 3 道硬性闸门与审计钩子；插件本身不写持久状态，卸载即干净。
 
 ### 日常使用 vs 压测
 
