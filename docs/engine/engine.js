@@ -159,7 +159,14 @@ function isCredWriteSignal(category, path, sh) {
   if (/(>>?|tee)\s+[^\s'"]+/.test(sh) && (CREDENTIAL_PATH.test(sh) || CREDENTIAL_SH.test(sh))) return true;
   return false;
 }
+// 🔴 [2026-10-26] 系统路径判据：补 OS 保留区（Windows 侧原为**完全空白**）。
+//   实测：`C:/Windows/System32/x.dll` 判 allow，而 `C:/Windows/System32/drivers/etc/hosts` 判 review ——
+//   两者同为系统保留区，差别只是路径里**恰好含 `/etc/`** 这个 Unix 目录名 ⇒ 判据读的是"字符串含哪个目录名"，
+//   不是"是否落在 OS 保留区"。此处补齐 Windows 保留区（来源＝OS 自身定义，非我们列举危险文件）。
+//   ⚠️ Unix 侧暂只保留原有四目录：加 bin/sbin/lib/usr 会命中用户自建的 `.../usr/...` 目录（误伤），
+//   留作待裁（扩表＝覆盖更全但误伤面更大，需对照实测后才可动）。
 const SYSTEM_PATH = /\/(etc|sys|proc|boot)\//i;
+const SYSTEM_PATH_WIN = /(?:^|[^a-z0-9])[a-z]:[\/\\](?:windows|program files(?: \(x86\))?|programdata|\$recycle\.bin|system volume information)(?:[\/\\]|$)/i;
 const EXTERNAL_TARGET = /https?:\/\/(?!localhost|127\.0\.0\.1|0\.0\.0\.0)[^\s'"]+/i;
 // [A3 · 2026-10-02 · 文本层止血·不自称完备] 外联判据从「HTTP 词形」升为「网络命名空间」：
 // DNS 盲区根因＝解析命令（dig/nslookup/host/getaddrinfo…）含域名/IP 却非 http(s)，被放行。
@@ -275,7 +282,34 @@ function _pathByKeyShape(args) {
   walk(args, 0);
   return found;
 }
+// 🔴 [2026-10-26 · 判据读真实落点，不读字符串形态] 路径先规范化再交给任何判据。
+//   实测病灶：`write{file_path:'C:/work/lab/../../Windows/System32/x.dll'}` 判 allow，
+//   而同落点的 `C:/Windows/System32/drivers/etc/hosts` 判 review —— 差别只在**字符串开头**，
+//   不在真实落点。⇒ "系统路径"判据读到的是字符串前缀，不是它最终写到哪里。
+//   归一放在**唯一出口**（extractPath 返回处），下游 SYSTEM_PATH / CREDENTIAL_PATH /
+//   isCredWrite / 锚匹配 / 日志全部同步 —— 不在各判据处各写一份（那又会分裂成两套）。
+function normalizeLoc(p) {
+  if (typeof p !== 'string' || !p) return p;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(p)) return p;   // URL 不是文件落点，不做文件系统归一
+  let s = p.replace(/\\/g, '/');
+  const tilde = s.startsWith('~') ? '~' : '';
+  if (tilde) s = s.slice(1);
+  const drive = (s.match(/^[A-Za-z]:/) || [''])[0];
+  if (drive) s = s.slice(drive.length);
+  const abs = s.startsWith('/');
+  const out = [];
+  for (const seg of s.split('/')) {
+    if (!seg || seg === '.') continue;
+    // `..` 上溯：能消则消；已到根外则**保留**（超根上溯无法确定真实落点，不得当成普通路径放过去）
+    if (seg === '..') { if (out.length) out.pop(); else out.push('..'); continue; }
+    out.push(seg);
+  }
+  return tilde + drive + (abs ? '/' : '') + out.join('/');
+}
 function extractPath(call) {
+  return normalizeLoc(_extractPathRaw(call));
+}
+function _extractPathRaw(call) {
   const c = call?.args ?? {};
   if (typeof c.path === 'string' && c.path.trim()) return c.path;
   if (typeof c.file === 'string' && c.file.trim()) return c.file;
@@ -362,7 +396,7 @@ function inferCallSemantics(call, ctx = {}) {
     // write_file 的 args.path 属写类工具，由 isCredWrite 判写方向，不受此过滤影响（sh 为空）。
     isCred: (CREDENTIAL_PATH.test(path) && !credNonReadHead(sh)) || (CREDENTIAL_SH.test(sh) && !credNonReadHead(sh)) || hasEnvSecretRef(sh) || hasEnvSecretRef(packed),
     isCredWrite,
-    isSystem: SYSTEM_PATH.test(path) || SYSTEM_PATH.test(sh),
+    isSystem: SYSTEM_PATH.test(path) || SYSTEM_PATH.test(sh) || SYSTEM_PATH_WIN.test(path) || SYSTEM_PATH_WIN.test(sh),
     isExternal,
     hitsInnerH: hitsInnerH(packed),
     // 方向信号（非内容信号）：执行内容在执行前是否可审计。
