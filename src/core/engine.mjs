@@ -416,8 +416,65 @@ function inferCallSemantics(call, ctx = {}) {
 //   H₀ → S₀(S₀+1)   ← S 增路径（稳态增量，纯白箱）
 //   H₀ → D₀(D₀+1)   ← D 增路径（=|S-1| 稳态绝对侵蚀）
 // 两路同时跑、都汇入 M₀(M+1)（独立事件沉淀），终态 S 再分叉 {S₀(S₀+1)/S₀(S₀-1)} 对比区分。
+// ────────────────────────────────────────────────────────────────────
+// 🔴 推演前提（2026-10-26 · 接 M_TWO_TENSES/FORWARD_INFERENCE 的锚在场判据）
+//
+//   安定（law.mjs `M_TWO_TENSES.adjudicationVsUse`）：
+//     「前提 ＝ 参照锚必须在场（R / 恒定项在位…）—— 锚不在则参照线不存在、Δ 无从测。」
+//
+//   实测病灶（`_tmp/dia-premise-20261026.mjs`）：`category === 'other'`（动作类别归不出）
+//   时，本层所有信号恒为 false ⇒
+//     · `simulateBranch(s,'S+1')` 走 `purelyBenign` 默认真值 ⇒ `finalS: +1`
+//     · `simulateBranch(s,'D-1')` 落末尾无 note 的 `finalS: 0`
+//   ⇒ `deduceRisk` 读成「S 增路径成立、D 路径无实际侵蚀」⇒ 输出 allow。
+//   但这两句**都不是推演结论**，是空转的默认真值 ⇒ 四象格「真的假话」：
+//   逐字核得真（确实没命中任何信号）、整体是假（它并没有推过）。
+//   ⇒ 病根不是"判错"，是**"我推不出"被写成了"我推过、没风险"**（与「未测 ≠ 零」同族）。
+//
+//   🔴 三次修正（同日）：第一版写成**两态**（锚在场 / 不在场）⇒ 影子实验把"真空"一起打成 review，
+//     误伤 3 条正常样本（查询类空 args / 写操作缺省 / 委托人授权删除）⇒ 当场还原。
+//     病根是**一桶两义**（本轮第三次撞见同一个形状）：`!path && !sh` 既可能是「真空」
+//     也可能是「有载荷但本层抽不到」，两者缺省方向相反，不能共用一个桶。
+//   ⇒ 定三态，且**真空不需要锚**（安 09-26：「空没有任何上下浮动…没有风险」⇒ 结论独立成立）：
+//       VACUUM     无载荷 ⇒ 无需推演，S 持平、M 未变（判决合法，理由不得写成"证明了增益"）
+//       ANCHORED   载荷在 ∧ 类别可归 ⇒ 推演可跑
+//       NO_ANCHOR  载荷在 ∧ 类别归不出 ⇒ 无参照线 ⇒ 本层未产生判据（未测 ≠ 零）
+const PREMISE = { VACUUM: 'vacuum', ANCHORED: 'anchored', NO_ANCHOR: 'no-anchor' };
+/** 载荷是否为空（真空判据）。`bash{command:''}` 属真空：有键、内容为空 —— 只看键数会判错。 */
+function isVacuous(call) {
+  const isEmpty = (v) => v === null || v === undefined || v === ''
+    || (Array.isArray(v) && v.length === 0)
+    || (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0);
+  return Object.values(call?.args ?? {}).every(isEmpty);
+}
+function inferencePremise(s, call) {
+  if (call && isVacuous(call)) {
+    return { ok: true, code: PREMISE.VACUUM,
+      note: '真空（无载荷）：无作用对象 ⇒ 无需推演，S 持平、M 未变' };
+  }
+  // 🔴 [2026-10-26 · 路径2 接路径1 的锚] 锚的判据源 = **归因层 `attributeCall`**，不是 `inferCategory`。
+  //   来由（attribution.mjs 文件头原文）：
+  //     「路径1（分形属性查归因）：先把"这是什么动作"归因清楚，以暴露的归因为**锚点**；
+  //       路径2（以锚点推演预测）：**拿锚点**跑推演（引擎既有 deduceRisk / simulateBranch）。」
+  //   实测（2026-10-26）：两条路径各有一套归因源，对同一工具结论相反 ——
+  //     `fs_write` / `delete_file`：inferCategory ⇒ 'other'（推演层空转）
+  //                                   attributeCall  ⇒ file-write / file-delete（锚在场）
+  //   ⇒ 推演层一直在用**自己那张表**当锚，而不是路径1 给出的锚 ⇒ 这是"判据分裂"的第三处
+  //     （前两处：extractPath 白名单 vs 词素；inferCategory vs attributeCall 此处）。
+  //   为何必须接归因层：孤立的 `inferCategory='other'` 既可能是"名不在表里"、也可能是"真中性"，
+  //     两者缺省方向相反；而归因层已经把这件事判完了（`ok` / `layer`）⇒ 单一来源。
+  const anchored = call
+    ? (() => { try { return attributeCall(call).ok === true; } catch { return false; } })()
+    : !!(s?.category && s.category !== 'other');
+  if (!anchored) {
+    return { ok: false, code: PREMISE.NO_ANCHOR,
+      note: '锚不在场（路径1 归不出动作类别）⇒ 推演无参照线：本层未产生判据，S/M 变化未测（≠ 无风险）' };
+  }
+  return { ok: true, code: PREMISE.ANCHORED, note: null };
+}
+
 // simulateBranch：给定语义，模拟"单条分支"的终态 S。kind='S+1' 即 S 增路径，'D-1' 即 D 增(蚀)路径。
-function simulateBranch(s, kind) {
+function simulateBranch(s, kind, premise = inferencePremise(s)) {
   if (kind === 'S+1') {
     // S 增路径：假定 call 作为稳态增量被接受。仅当 call 纯稳态贡献（无任何风险信号）才真 +1。
     // 前提：可审计性是 S 成立的前提——
@@ -428,8 +485,11 @@ function simulateBranch(s, kind) {
     const auditable = !opaque;
     const purelyBenign = auditable && !s.isCred && !s.isSystem && !s.isExternal && !s.hitsInnerH && !s.isAuthSink;
     return {
-      path: 'S+1', finalS: purelyBenign ? +1 : 0,
+      // 🔴 前提三态：真空（无载荷）⇒ 结论独立成立，可给 +1；锚不在场 ⇒ 空转，不得给 +1
+      path: 'S+1', finalS: (purelyBenign && premise.ok) ? +1 : 0,
+      premise,
       ...(auditable ? {} : { note: '执行内容不可审计（不透明源/未知变量/引用本会话写入文件/跨调用敏感源→汇组合）→ 无法证明稳态增量，S+1 不成立' }),
+      ...(premise.ok ? {} : { note: `${premise.note} ⇒ S+1 的 +1 未成立（空转，非增益）` }),
     };
   }
   // D-1 路径（=|S-1|）：假定 call 触发损伤。侵蚀量按风险信号严重度分级（客观结构，非枚举具体值）。
@@ -453,7 +513,16 @@ function simulateBranch(s, kind) {
   if (s.isCredWrite) return { path: 'D-1', finalS: -2, note: '写凭据存放位（篡改/植入身份凭据），需人工确认' };
   if (s.isSystem && ['read', 'write', 'exec', 'exec-destructive'].includes(s.category)) return { path: 'D-1', finalS: -1, note: '系统信息泄露/完整性受损' };
   if (s.hasOpaqueVar) return { path: 'D-1', finalS: -1, note: '执行内容含未知变量引用，值不可审计（无法证明无风险）' };
-  return { path: 'D-1', finalS: 0 };
+  // 🔴 [2026-10-26] 末尾这一格是「假定有损伤」分支的**缺省**。原来写 `finalS: 0` 且无 note
+  //   ⇒ 与"推演过了、确认无侵蚀"在读数上完全同形（阿澄 81 的判据精确命中此格，只是他猜的位置在
+  //     另一个出口）。缺省值本身没错（0＝未命中任何侵蚀条目），错在**没交代它是不是推出来的**：
+  //     · 锚在场（category 可归）⇒ 0 是结论：查过侵蚀条目、无一命中 ⇒ 无侵蚀。
+  //     · 锚不在场（category='other'）⇒ 0 是空转：侵蚀条目一条都没被问过 ⇒ **未测**。
+  return {
+    path: 'D-1', finalS: 0,
+    premise,
+    ...(premise.ok ? { note: '侵蚀条目已逐条比对，无一命中 ⇒ 无侵蚀（结论）' } : { note: `${premise.note} ⇒ 0 是空转缺省，非"无侵蚀"结论` }),
+  };
 }
 
 // ---------------- 默认 R 刚性锚点策略（具象判据示例） ----------------
@@ -1689,8 +1758,10 @@ export class WeiwenLawEngine {
     //   ⇒ 判据自否定：越敏感 ⇒ 越早退 ⇒ 越到不了登记点 ⇒ refsSessionSensitiveRead「源→汇」通道结构上不可达。
     //   为何测试全绿却未暴露：既有用例直调 deduceRisk（绕过判定层）⇒ 只测了后半段，前段断路未被覆盖。
     // H 分叉：S 增路径 + D 增(蚀)路径 同时模拟（并行，非二选一）
-    const bS = simulateBranch(s, 'S+1');
-    const bD = simulateBranch(s, 'D-1');
+    // 🔴 [2026-10-26] 前提先算、再喂两路：锚不在场时两路的缺省值都不是结论（见 inferencePremise）。
+    const premise = inferencePremise(s, call);
+    const bS = simulateBranch(s, 'S+1', premise);
+    const bD = simulateBranch(s, 'D-1', premise);
     // 两路都汇入 M（独立事件沉淀，手稿：M₀(M₀+1)）
     const m = { m: 1, branches: { bS, bD } };
     // 终态 S 对比区分（手稿：{S₀(S₀+1) / S₀(S₀-1)}）。
@@ -1704,8 +1775,13 @@ export class WeiwenLawEngine {
         reason: `推演判定高风险（D 路径确定性侵蚀 S）：${bD.note || '凭据/内H/外传'}` };
     }
     if (erosion < 0 || !sOk) {
-      return { verdict: 'review', m, branches: { bS, bD }, deduced: true,
-        reason: `推演判定中风险（${!sOk ? 'S+1 不成立：无法证明稳态增量' : `D 路径轻度侵蚀 S：${bD.note || '灰区'}`}）：建议限权/二次确认` };
+      // 🔴 [2026-10-26] 前提缺失时**点名是前提缺失**，不再笼统说"S+1 不成立"：
+      //   后者会让外部读成"推演跑了、结论是中等风险"，而真相是"推演没跑起来"。
+      //   （实测反馈：外部审计 agent 无法从这类回执反推规则 ⇒ 读数必须可归因到具体一层。）
+      return { verdict: 'review', m, branches: { bS, bD }, deduced: true, premise,
+        reason: !premise.ok
+          ? `推演未产生判据（${premise.note}）：交还人工，建议限权/二次确认`
+          : `推演判定中风险（${!sOk ? 'S+1 不成立：无法证明稳态增量' : `D 路径轻度侵蚀 S：${bD.note || '灰区'}`}）：建议限权/二次确认` };
     }
     // [2026-09-26 · reason 正位（安 空输入判据 · 根因级）] 无动作文本 ⇒ **如实陈述**，不套"S 增路径成立"。
     //   安的原话：「空，没有上下文，仅仅只是空，按照唯稳律推演，空没有任何上下浮动，持平稳定，
@@ -1728,12 +1804,32 @@ export class WeiwenLawEngine {
       //   🔴 **根因（一桶两义）**：该收口把 `null`（＝**本层不接**）也改成了 review。⇒ 正确修法必须**带门**：
       //     先判"该对象是否落在本层职责域内"（够不着 vs 不涉及），**只有"受理事由成立且够不着"才 review**；
       //     不能只做"穷尽 ⇒ review"。⇒ 已在 `deployment.md` 更正 `XSUB-10` 登记。
-      return { verdict: 'allow', m, branches: { bS, bD }, deduced: true,
-        reason: '无扰动入基线（未抽到动作文本）：S 持平、M 未变 ⇒ 无风险，放行' };
+      // ── 🔴 [2026-10-26 · 推演前提收口] 本出口必须交代"这一格是推出来的、还是空转的"。──
+      //   见 simulateBranch 上方 premise 注释与实测 `_tmp/dia-premise-20261026.mjs`：
+      //   `glob{pattern}` / `grep{pattern,path}` 都落在这里或其下一格，原文案一律给
+      //   「无扰动 ⇒ 无风险」/「S 增路径成立」，而实际是 **category='other' ⇒ 信号恒 false**。
+      //   ⚠️ 仍**不改 verdict**：锚在场的终局判定在归因层（2100+ `!attrib.ok ∧ hasPayload ⇒ review`），
+      //     此处重复扣会误伤真空样本；只改**读数**，让「未测」不再显示成「零风险」（铁律：未测 ≠ 零）。
+      // 「真空」的判据是**载荷为空**，不是"键数为零"：`bash{command:''}` 有一个键、内容为空，
+      //   安 09-26 那次的样本正是它（原话「空，没有上下文，仅仅只是空」）⇒ 只看键数会把这类判成"有对象"。
+      const isEmptyPayload = (v) => v === null || v === undefined || v === ''
+        || (Array.isArray(v) && v.length === 0)
+        || (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0);
+      const noObject = Object.values(call?.args ?? {}).every(isEmptyPayload);
+      if (noObject) {
+        return { verdict: 'allow', m, branches: { bS, bD }, deduced: true, premise,
+          reason: '无扰动入基线（真空：无作用对象可审）：S 持平、M 未变 ⇒ 无风险，放行' };
+      }
+      return { verdict: 'allow', m, branches: { bS, bD }, deduced: true, premise,
+        reason: '本层未取得作用对象（未抽到 shell 命令 / 文件落点）⇒ 推演未产生判据：S/M 变化未测（≠ 无风险）' };
     }
     // 双成立（S+1=+1 且 D 侵蚀=0）→ 风险=0 < 唯稳律 < 稳态 严格成立 → allow
-    return { verdict: 'allow', m, branches: { bS, bD }, deduced: true,
-      reason: '推演判定低风险（S 增路径成立、D 路径无实际侵蚀）：放行并累积 S' };
+    // 🔴 同上：`premise.ok === false` 时，S+1 的 +1 与 D-1 的 0 都是空转缺省，
+    //   不得陈述为"S 增路径成立" —— 那句话是**真的假话**（核得真、整体假）。
+    return { verdict: 'allow', m, branches: { bS, bD }, deduced: true, premise,
+      reason: premise.ok
+        ? '推演判定低风险（S 增路径成立、D 路径无实际侵蚀）：放行并累积 S'
+        : `推演未产生判据（${premise.note}）⇒ 本格放行依据不来自推演层` };
   }
 
   // ---------- M 沉淀：推演层两分支都汇入 M（独立事件，append-only 历史刻痕） ----------
