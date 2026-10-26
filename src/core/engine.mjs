@@ -248,15 +248,45 @@ function opaqueExecSignal({ name, category, path, sh, packed }) {
   return false;
 }
 
+// 🔴 [2026-10-26 · 结构统一] 位置判据**单一来源**：本函数与 `_sh12LocKeyShape` 共用 `_SH12_LOC_KEY`。
+//   旧版只认 `path` / `file` 两个**字段名**（白名单）⇒ 宿主用 `file_path` 时抽不到
+//   ⇒ 落到「无扰动 ⇒ allow」出口 ⇒ **写操作恒放行**（2026-10-26 外部 agent 实跑取证）。
+//   而同一次调用的 `_sh12LocKeyShape` 用**词素形态**就认得出 `file_path` ⇒ 两套判据对同一事实相反：
+//     「形态判据说够得着」∧「抽取器说抽不到」⇒ **中间这一格没人兜 ⇒ 黑洞**。
+//   ⚠️ 根因不是"漏了 file_path 这个名字"（那是枚举，宿主任意改名即复发），
+//      是**同一个问题存在两套判据源**。⇒ 修法＝合并判据源，不是补白名单。
+//   ⚠️ 也不新造正则：直接引用 `_SH12_LOC_KEY`，将来改一处两处同时变 —— 判据分裂的成因就此断掉。
+function _pathByKeyShape(args) {
+  let found = '';
+  const walk = (o, d) => {
+    if (found || d > 3 || o == null) return;
+    if (Array.isArray(o)) { o.forEach((x) => walk(x, d + 1)); return; }
+    if (typeof o === 'object') {
+      for (const k of Object.keys(o)) {
+        const v = o[k];
+        if (_SH12_LOC_KEY.test(k) && typeof v === 'string' && v.trim()) { found = v.trim(); return; }
+        walk(v, d + 1);
+      }
+    }
+  };
+  walk(args, 0);
+  return found;
+}
 function extractPath(call) {
   const c = call?.args ?? {};
-  if (typeof c.path === 'string') return c.path;
-  if (typeof c.file === 'string') return c.file;
+  if (typeof c.path === 'string' && c.path.trim()) return c.path;
+  if (typeof c.file === 'string' && c.file.trim()) return c.file;
+  const byShape = _pathByKeyShape(c);   // ← 形态兜底（与 _sh12LocKeyShape 同源）
+  if (byShape) return byShape;
   const sh = extractShell(call);
   const m = sh.match(/(?:cat|head|tail|read|less|more|vi|vim|nano|cp|mv|rm|echo|write)\s+([^\s]+)/i);
   return m ? m[1] : '';
 }
-function inferCategory(call) {
+// 🔴 [2026-10-26] 导出（不改逻辑）：适配层「窗口警察」要判"这个动作能不能造成不可逆改变"，
+//   而该判据在本函数里已经存在。**必须复用，不得在适配层另写一份** ——
+//   同日已实证一次判据分裂的代价：`extractPath`（字段白名单）与 `_sh12LocKeyShape`（词素形态）
+//   对同一调用给出相反结论 ⇒ 写操作恒放行。⇒ 判据源只许一处，改动此处即全员同步。
+export function inferCategory(call) {
   const name = call?.name ?? '';
   if (TOOL_CATEGORY[name]) return TOOL_CATEGORY[name];
   const a = call?.args ?? {};
@@ -273,6 +303,26 @@ function inferCategory(call) {
     return 'exec';
   }
   return 'other';
+}
+// 🔴 [2026-10-26 · 结构统一] 「不可逆性」是**一个判据**，不是各门各写一份。
+//   同日实测已见判据分裂的代价：`extractPath`（字段白名单）与 `_sh12LocKeyShape`（词素形态）
+//   对同一调用给出相反结论 ⇒ 写操作恒放行。⇒ 本判据定义在此、**唯一来源**：
+//   适配层「窗口警察」与引擎各门（R 归因 / 推演落点 / 无扰动出口）全部共用。
+//   用途：决定「审查强度」。不可逆才要求归因与物证；可逆/只读不要求 ——
+//   既不把"没看"当"没事"（fail-open），也不把只读翻成拦截（误伤）。
+const IRREVERSIBLE_CATS = new Set(['write', 'exec-destructive', 'exfil', 'exfil-net']);
+// 破坏语义词素（例示，非完备清单）：认**语素**不认完整名，宿主任意命名都命中。
+//   刻意不含 exec|shell|bash|pwsh|cmd|run|spawn —— 那些是**执行通道名**（能跑命令），不是**动作意图**（要破坏）；
+//   混进来会把「用 pwsh 列个目录」判成不可逆 ⇒ 只读也被要求归因/物证（实跑误伤）。
+//   通道类由 inferCategory 读**命令内容**去判（exec vs exec-destructive），不靠工具名。
+const IRREVERSIBLE_VERB = /(delete|remove|write|edit|create|drop|destroy|truncate|purge|wipe|overwrite|rename|move|chmod|chown|send|upload|post|put|patch)/i;
+export function isIrreversible(call) {
+  const cat = inferCategory(call);
+  if (IRREVERSIBLE_CATS.has(cat)) return true;
+  if (cat === 'read') return false;                      // 明确只读 ⇒ 可逆
+  const name = String(call?.name ?? '');
+  const action = typeof call?.args?.action === 'string' ? call.args.action : '';
+  return IRREVERSIBLE_VERB.test(name) || IRREVERSIBLE_VERB.test(action);
 }
 function inferCallSemantics(call, ctx = {}) {
   const category = inferCategory(call);
@@ -2016,13 +2066,35 @@ export class WeiwenLawEngine {
     if (!attrib.ok) {
       // 分形子项 m 果 = 归不出：动作类别不可判 → 铁律「判不出来就 review，不猜」。
       // 挂 attrib + fractalSubM:true 标注此为「分形子项级」触发，非整体推演结论。
-      return {
-        kind: 'review',
-        law: 'R',
-        reason: `路径1 归因锚定失败（名=${call?.name ?? ''} 中性或无可观测行为）：动作类别不可判，交还人工，不猜`,
-        attrib,
-        fractalSubM: true,
-      };
+      //
+      // 🔴 [2026-10-26 · 结构修法 · 第二次才对] 「归不出」仍分两种出口，但**门不是不可逆性**。
+      //   ⚠️ 我先写成「不可逆 ⇒ review / 可逆 ⇒ 免归因」，被回归测试当场打回（3 条安全用例转 allow）：
+      //     `deploy_keylogger{target:HOST}` 归不出类别 ⇒ 我的 `isIrreversible` 内部也归不出 ⇒ 'other'
+      //     ⇒ 被当"可逆"放行 ⇒ **漏判**。⇒ 这正是原病灶的同构翻版：**把"我不知道"当成"没有风险"**
+      //     （原来在"抽不到目标 ⇒ 无扰动 ⇒ allow"那一格）。换位置不等于修好。
+      //   ⇒ 正确的门是**有没有可审之物**（结构，与窗口警察「真空不要求物证」同源）：
+      //     · **真空**（无参数）⇒ 没有作用对象可审 ⇒ 免归因，继续常规推演。
+      //       实测样本：`list_rigid_anchors{}` / `query_bugstop{}`（自省工具被自己拒＝越读越瞎）。
+      //     · **有参数但归不出** ⇒ 我知道它要动东西、却不知道动什么 ⇒ **review（不猜）**。
+      //       实测样本：`deploy_keylogger{target:HOST}` / `{config:{target:'HOST'}}` ⇒ 必须仍 review。
+      //   ⇒ 判据：**"归不出"只能往 review 走，不能往 allow 走；能往 allow 走的只有"没东西可归"。**
+      const hasPayload = Object.keys(call?.args ?? {}).length > 0;
+      if (hasPayload) {
+        return {
+          kind: 'review',
+          law: 'R',
+          reason: `路径1 归因锚定失败（名=${call?.name ?? ''} 中性或无可观测行为）：动作类别不可判，交还人工，不猜`,
+          attrib,
+          fractalSubM: true,
+        };
+      }
+      // 真空 ⇒ 无可审之物（不是"跳过审查"，是"没有对象需要归因"）
+      this._mark('R', {
+        step: '归因锚定（真空：无可审之物）',
+        verdict: null,
+        cuts: false,
+        note: '该调用无参数、无作用对象 ⇒ 无可归因之物 ⇒ 继续常规推演（不因"名中性"而拒）',
+      });
     }
     // 【2026-09-15 铁律8 补强 · 接线】破坏性/删除类动作「目标（物证）未外化」→ 证据不足 → review
     // 接 destructiveTargetMissing（L682）：仅标记「破坏性动作 + 目标缺失」，命中即交还人工。

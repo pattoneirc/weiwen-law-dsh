@@ -19,8 +19,25 @@
 // 仍属 RC 预览，官方提示后续存在破坏性 API 变更；接入真机前以官方 docs 当前版本复核。
 
 import { writeFileSync, appendFileSync } from 'node:fs';
-import { WeiwenLawEngine, DEFAULT_RIGID_ANCHORS } from './core/engine.mjs';
+import { WeiwenLawEngine, DEFAULT_RIGID_ANCHORS, inferCategory, isIrreversible } from './core/engine.mjs';
 import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
+// [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
+//   不参与判决、不写状态、不进任何闸门 —— 元认知只能读不能管（见 docs/runway-and-criterion §四）。
+import { readout as criterionReadout } from './core/readout.mjs';
+import { strataReadout } from './core/strata.mjs';
+import { NESTED_VARS, M_CONSTRAINT, mDirection, mTwoLayer, mConstraintShape, nestAudit } from './core/nested.mjs';
+// [2026-10-20 12:0x] 变量即动作：R＝查域（动作）、H＝观察者视角（选取）＋ S↔D 张力 L 的三档度量。
+//   安：R 不要定死的赋值，要做成可执行动作；张力「我没想好…你试试」。
+import {
+  R_ACTION, H_OBSERVER, H_PERMIT, hPermitOf, LOSS_BEARER, lossRoute, tensionOf, slidePos, verbAudit,
+  TENSION_OUTPUT, checkTensionOutput,
+  R_ONTOLOGY, R_SCALE, R_RELAY, rSourceGrade, MARGIN_CONSENSUS, pickMargin, notchCapOf,
+  CLAUSE_SLOTS, checkClauseShape,
+  H_AUTHORITY, CAPACITY_VS_LIABILITY, ESCALATION, ESCALATE, mustEscalate, EVIDENCE_LIFECYCLE,
+  GATE_FOLD, gateOf,
+  PROVENANCE_ATTESTATION,
+  H_UMBRELLA, H_FACETS, H_SHAPE, INNER_OUTER_SEAM, FACET_DISCIPLINE, facetOf, isCrossFacet, FORMULA_INPUT,
+} from './core/verb.mjs';
 import { bugKeyOf } from './core/bugstop.mjs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
@@ -59,28 +76,45 @@ function branchesSummary(br) {
 
 // ⑥ 窗口警察：证据充分性门禁（审计层，零侵入 src/core 判据）
 //   映射：检察院提交证据不足 → 法院发回补充。DSH 这一窗口只认「物证具在」的调用。
-//   物证 = 可被观测的具体作用对象（路径 / URL / 命令中的目标串）；flag（-rf 等）不算。
-//   仅对「有资源操作字段但未外化目标」的调用拦截——无资源字段的（查询 / 自查类）放行，避免误伤。
-//   越界目标（如 rm -rf /）物证仍具在，放行给引擎 R 锚点裁决；本门禁只管「目标缺失」，不抢戏。
-function evidenceOf(args) {
-  if (!args || typeof args !== 'object') return null; // 无资源字段 → 不要求物证
-  const RES = ['command', 'path', 'url'];
-  if (!RES.some((f) => f in args)) return null; // 无资源操作字段 → 无需物证
-  for (const f of RES) {
-    if (!(f in args)) continue;
-    const v = args[f];
-    if (typeof v !== 'string') continue;
-    if (!v.trim()) return false; // 字段存在但空 → 物证缺失
-    if (f === 'command') {
-      // 命令串需解析出具体目标形态（路径 / URL）；纯 `rm -rf` 无参视为未外化
-      const m = v.match(/(?:^|\s)((?:https?:\/\/|\/|\.\/|~|\w:)[^\s]*)/);
-      if (!m) return false;
+//   物证 = 可被观测的具体作用对象（路径 / URL）；flag（-rf 等）不算。
+//
+// 🔴 [2026-10-26 · 结构修法] **证据要求跟着「不可逆性」走，不跟着「字段名」走。**
+//   旧版判据＝「参数里有没有 command/path/url 这三个字段名」⇒ 这是枚举，且方向错：
+//     · 只读操作被要求物证 ⇒ `Get-ChildItem`（列目录）恒判「未外化」恒拒（实跑取证）；
+//     · 而写操作因抽取器抽不到、改走 allow 出口 ⇒ 反被放行。
+//   ⇒ **同一个缺省（证据不足），两个方向**（写放行 / 读拒绝）—— 违铁律 #7「缺省方向不可丢」。
+//   根因不是"少认了几个字段"，是**门的判据选错了层**：
+//     该问「这个动作**能不能造成不可逆改变**」（结构），却问了「参数里有没有某个名字」（枚举）。
+//   ⇒ 新版：先判不可逆性（复用引擎 `isIrreversible`，**同一判据源、单点定义**，不另写一份）；
+//        不可逆 ⇒ 要求物证；可逆/只读/查询 ⇒ 不要求（不误伤）。
+//   ⚠️ 物证具在 ≠ 放行：越界目标（rm -rf /）仍交引擎 R 锚点裁决（本门只管「目标缺失」）。
+// 物证形态：路径 / URL。**认形态不认字段名**（与 engine `_SH12_LOC_KEY` 同一哲学：宿主任意命名都够得着）
+const EVIDENCE_SHAPE = /(?:[A-Za-z]:[\\/]|\\\\|\/|https?:\/\/|~[\\/])/;
+function evidenceOf(call) {
+  const args = call?.args;
+  if (!args || typeof args !== 'object') return null;   // 无参数对象 → 不要求物证
+  if (Object.keys(args).length === 0) return null;      // 真空（查询/自查类）→ 不要求，避免误伤
+  if (!isIrreversible(call)) return null;               // 可逆/只读 → 不要求物证
+  // 不可逆 ⇒ 必须在参数里找到"具体对象"的形态；扫全部字符串值（含嵌套），不认字段名
+  let sawString = false;
+  let sawObject = false;
+  const walk = (v, d) => {
+    if (d > 3 || v == null || sawObject) return;
+    if (typeof v === 'string') {
+      if (!v.trim()) return;
+      sawString = true;
+      if (EVIDENCE_SHAPE.test(v)) sawObject = true;
+      return;
     }
-  }
-  return true; // 物证具在
+    if (Array.isArray(v)) { v.forEach((x) => walk(x, d + 1)); return; }
+    if (typeof v === 'object') { Object.values(v).forEach((x) => walk(x, d + 1)); }
+  };
+  walk(args, 0);
+  if (!sawString) return false;   // 有参数但全空 ⇒ 物证缺失
+  return sawObject;               // 找到具体对象形态 ⇒ 物证具在；否则缺失
 }
 function policeGate(call) {
-  const ev = evidenceOf(call?.args);
+  const ev = evidenceOf(call);
   if (ev === false) {
     // 证据不足 → 发回补充：退回调用方（模型）补充具体作用对象后重提，不做实质裁决
     return {
@@ -155,7 +189,9 @@ const inject = ['tools'];
 //     （在场量不因无信息帧而离场），只有**显式撤回**才让范围离场 ⇒ 契约纪律见 `setPrincipalScope`。
 //   结构入口 = `setPrincipalScope()`（模块级 API，由宿主集成方在启动边界调用）。
 //   它**不是工具** ⇒ 模型调不到 ⇒ **结构上不可能自我授权**（主体分离由位置保证，不靠内容判别）。
-//   入口未接 ⇒ 锚池留空 ⇒ 不可逆动作交人工（fail-closed）。**这是设计，不是漏读消息。**
+//   入口未接 ⇒ 锚池留空 ⇒ 不可逆动作交人工（fail-closed）。**fail-closed 这一格是设计，不是漏读消息。**
+//   ⚠️ 但「入口未接」本身是**集成缺口**、不是设计定论（2026-10-26 修正）：现状是宿主一次都没调过它。
+//      别把"现在没人接"读成"设计上不该接" —— 那会让真权利人永远无法举证（见 healBrokenWindow 同款问题）。
 const PRINCIPAL_ROLE_HINT = /^(user|human|principal|operator|owner)$/i;
 
 // 结构入口（宿主集成方调用；模型不可达）。返回上一值便于回退，不给"开关式骑墙"留口。
@@ -284,6 +320,28 @@ function apply(ctx) {
   //   使复位保持为"解除本进程止损"的动作，而不是无界持有引用。
   _liveEngines.add(engine);
   if (_liveEngines.size > 32) _liveEngines.delete(_liveEngines.values().next().value);
+
+  // 🔴 [2026-10-26 · 结构修法] 「我拦下的」≠「真失败的」—— 按**调用身份**分开，不按内容猜。
+  //
+  //   实测病灶（2026-10-26 外部 agent 实跑，日志 78 行）：本层判定「证据不足·发回补充」→ 拒
+  //   → 工具未执行 → 宿主把它包成 `result.error` 回灌 → `tools/result` 见 error 即 `onFailure()`
+  //   ⇒ **本层正常的拦截，被记成自己的失败**。5 次合法拒绝 = 达破窗阈值 = 全工具面切断。
+  //   更糟的是它自举：被拦下的调用继续 +1（5/5 → 10/5）⇒ 拦得越对，死得越快。
+  //
+  //   根因：`result.error` 一句话承载了**两个相反含义** ——
+  //     (i) 「执行了，出错了」 ＝ 真失败 ⇒ 应计入（一桶两义的另一半）
+  //     (ii) 「被本层挡住了，没执行」 ＝ 拦截**成功** ⇒ 不得计入
+  //   二者在回执里长得一模一样（都是 error）。**内容分不出，只能靠身份分。**
+  //   ⇒ 用 `exec.callId`（宿主给的稳定调用身份）对齐：我拒了哪个 id，那个 id 的 error 就是我造成的。
+  //   ⚠️ 不改 `result.error` 的判读规则，只补一层"这条 error 是谁造成的"的来源判定。
+  //   ⚠️ 上限防无界增长：宿主可能不回调 result（如整步被拒）⇒ 留下孤儿 id，超出即丢最旧。
+  const _blockedCallIds = new Set();
+  const markBlocked = (exec) => {
+    const id = exec?.callId;
+    if (!id) return;
+    _blockedCallIds.add(id);
+    if (_blockedCallIds.size > 256) _blockedCallIds.delete(_blockedCallIds.values().next().value);
+  };
   logline('apply() entered — 注册 tools/pre-execute, agent/pre-step, tools/result 与白箱自查工具');
 
   // [2026-09-20 · 同构回填] 授权锚：**只由结构入口喂养**（`setPrincipalScope`，宿主集成方调用）。窗口面不再供养。
@@ -306,7 +364,7 @@ function apply(ctx) {
     lastObservedAt: null,
     agentBoundary: observeBoundary(undefined),
     applyCtxBoundary: observeBoundary(ctx),
-    structGap: '授权锚须由宿主在结构边界提供（setPrincipalScope：启动 scope / 任务配置）。窗口面文本是观察面，不作锚源（噪音）⇒ 入口未接时锚池留空、不可逆动作交人工 = 设计而非漏读。',
+    structGap: '授权锚须由宿主在结构边界提供（setPrincipalScope：启动 scope / 任务配置）。窗口面文本是观察面，不作锚源（噪音）⇒ 入口未接时锚池留空、不可逆动作交人工。⚠️ 分层说明（2026-10-26 修正）："不采信窗口文本"是设计（正确，位置判据优于角色判据）；"入口至今无人调用"是**集成缺口**，不是设计定论——宿主接上 setPrincipalScope 后此格才实义。原文写作"设计而非漏读"会被下一个维护者读成"这是有意的永久状态，不必去接线"。',
     // [2026-09-20 · 位置量观测] 宿主在门这一侧**自带**的结构位置：`agent`（谁在调）/ `parent`（从哪派生）。
     //   纯观测、**不参与裁决**（授权仍只认委托人声明的范围）；用途＝实机一跑即知该宿主是否给位置量，
     //   以及**派生调用有没有被计数**（＝"门覆盖全路径"的可观测证据，非推测）。
@@ -351,12 +409,14 @@ function apply(ctx) {
     // ⑥ 窗口警察：证据不足（物证缺失）的调用直接发回补充，不进引擎实质裁决。
     const gate = policeGate(call);
     if (gate) {
+      markBlocked(exec);   // 本层拦下 ⇒ 该 callId 后续若回 error，是本层造成的，不得计入失败
       logline(`pre-execute ${exec?.name} -> police gate (证据不足·发回补充)`);
       return gate;
     }
     const decision = engine.decideToolCall(call);
     logline(`pre-execute ${exec?.name} -> ${decision.kind}${decision.law ? '(' + decision.law + ')' : ''}`);
     if (decision.kind === 'deny' || decision.kind === 'review') {
+      markBlocked(exec);   // 同上：拦住 ≠ 失败
       // 阻断该步、不扩散（D 破窗止损 / M 以断保续 / 推演中高风险兜底）
       // review（中风险）在无人工确认环境保守拦截；reason 已标注"建议二次确认"
       // 透传引擎闭环字段与推演风险等级，供调用方读取
@@ -516,6 +576,14 @@ function apply(ctx) {
   // 位置即契约：不为旧错法留兼容垫片（否则"位置错也认"，就把结构判据换成了内容判据）。
   ctx.on('tools/result', (exec, result) => {
     if (result?.error) {
+      // 🔴 [2026-10-26] 先判这条 error 是**谁造成的**，再决定记不记账。
+      //   `result.error` 同时承载「执行失败」与「被本层拦下」两种相反含义，内容分不出 ⇒ 靠 callId 分。
+      const id = exec?.callId;
+      if (id && _blockedCallIds.has(id)) {
+        _blockedCallIds.delete(id);
+        logline(`result audit: error 由本层拦截产生（callId=${id}）⇒ 拦截成功，不计入破窗（streak=${engine.failureStreak}/${engine.maxFailureStreak}）`);
+        return;
+      }
       engine.onFailure();
       logline(`result audit: failure accrued（streak=${engine.failureStreak}/${engine.maxFailureStreak}）`);
     }
@@ -628,6 +696,221 @@ function apply(ctx) {
         engine: engine.anchorChannel,
         note: '授权锚唯一来源＝结构入口 setPrincipalScope（宿主在启动/step 边界声明任务范围）；被审计 agent 的自述与窗口面文本**都不授权**（否则＝自我授权 / 假人证）。入口未接 ⇒ 锚池留空 ⇒ 不可逆动作交人工，此为设计而非漏读。',
       };
+    },
+  }));
+
+  // [2026-10-20] 判据接线自查（元认知的第一个可观测面）
+  //   来由：law.mjs 导出 27 条判据，实测仅 5 条真进计算；其中 10 条自带「非引擎运行期判据位」声明
+  //   ⇒ 零引用与真缺口混作一堆，无法区分。本条把「各走哪条路」变成可查询读数。
+  //   ⚠️ 只读：不产生 verdict、不写状态、不进闸门 —— 元认知只能读不能管。
+  ctx.tools.register(defineTool({
+    name: 'query_criterion_wiring',
+    description: '判据接线自查（只读）：库内判据按「判决位／读数位／声明位／未定」四档登记，返回各档成员、已登记的缺口（该接却没接）、以及因果链三时相（过去·现在·未来）各接没接。用于自查"我知道的规则里有几条真的进了计算"，不改变任何放行/拦截判决。',
+    parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute() {
+      return {
+        ...criterionReadout(engine),
+        note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。',
+      };
+    },
+  }));
+  // ── 五层推演读数（R→S→D→H→M，逐层给「可代入量」）──────────────────
+  //   来由（安 2026-10-20）：公式若只是形容词，就一次也用不上。
+  //   ⇒ 每层先算一个量，结论＝量之间的关系；算不出的量显式落「待取证／未实现」并带线索。
+  //   ⚠️ 只读：不产生 verdict、不写状态、不进闸门。
+  ctx.tools.register(defineTool({
+    name: 'query_strata',
+    description: '五层推演读数（只读）：按 R→S→D→H→M 逐层返回「可代入的量」及其值，每层附公式与「在哪停」。三态显式：ok（现在能算）／pending（缺常数或取证，带 TBD 线索）／absent（实现层没有这个量）。另返回跨层代入禁令（如 ΣS 与 S_now 聚合方向相反、不可互代）。R 层另给域容量面：p_max（已取证的标准值）／N_opp（分母，engine 现缺）／R₀（=p×N）／rCapRoute（该域该走哪条公式），并附域表体检 rcap（把「条目非法 malformed」与「标准合法不给数 no_num_legal」分开计数）。不改变任何放行/拦截判决。',
+    parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute() {
+      return {
+        ...strataReadout(engine),
+        note: '只读面：不产生 verdict、不写状态、不参与闸门。pending/absent 是如实登记，不是免责通道；pending 必带 evidence 线索，absent 必带缺口说明。',
+      };
+    },
+  }));
+
+  // ── 四层嵌套（R/S/D/H 各自的宏观／微观）＋ M 公式方向 ─────────────
+  //   来由（安 2026-10-20 11:28）：每个变量内部都有嵌套结构，宏观与微观。
+  //   ⚠️ 只读：M 只给方向，绝不给数值（CORE_FORMULA 明令不赋值）。
+  ctx.tools.register(defineTool({
+    name: 'query_nested',
+    description: '四层嵌套读数（只读）：返回 R/S/D/H 各自的宏观形态与微观形态、服从关系（binds）、展开终止判据，以及医疗域实例；并给出 M=(R×S)/(D×H) 的**方向**判定（up/down/indeterminate，绝不输出数值——公式原文明令不赋值不计算）。可传入各层变化 delta（-1/0/+1）计算方向。另返回公式约束 `0 < H/(S↔D) < R` 的形态判定：`↔` **不是算子**，它标记 H 内部那条滑轨（S 端↔D 端），H 是轨上滑块 ⇒ 只判滑块位置形态（on_rail/off_low/off_high/unknown），恒不给数值。传 hPosition 可判形态。不产生 verdict、不进闸门。',
+    parameters: {
+      delta: { type: 'object', additionalProperties: true, description: '各层变化：{R,S,D,H}，每项 -1（降）/0（不变）/+1（升）。省略则只返回静态结构与体检。' },
+      macroDelta: { type: 'object', additionalProperties: true, description: '双层模式的宏观层变化（可选）；与 microDelta 同时给出时走双层服从判定。' },
+      microDelta: { type: 'object', additionalProperties: true, description: '双层模式的微观层变化（可选）。' },
+      hPosition: { type: 'string', description: 'H 在 S↔D 滑轨上的位置形态：inside（严格在轨内）/ at_s（贴死 S 端，能动性归零）/ at_d（贴到 D 端，达 R 标度）/ beyond（越过 R，脱域）。省略则不判（unknown，≠ 成立）。' },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute(args = {}) {
+      const out = { vars: NESTED_VARS, audit: nestAudit(), constraint: M_CONSTRAINT };
+      if (args.macroDelta || args.microDelta) {
+        out.twoLayer = mTwoLayer(args.macroDelta || {}, args.microDelta || {});
+      } else if (args.delta) {
+        out.direction = mDirection(args.delta);
+      }
+      if (args.hPosition !== undefined) {
+        out.constraintShape = mConstraintShape({ pos: args.hPosition });
+      }
+      out.note = '只读面：M 只输出方向，不输出数值（CORE_FORMULA: 定性方向关系，不赋值）。indeterminate 是定性关系的上限，不是缺口。⚠️ `↔` 不是算子（不存在「待实现的算子」）；它标记 H 内部那条滑轨。**区间长度（张力 L）可求**，见 query_tension；不可求的是把 `↔` 当运算符。';
+      return out;
+    },
+  }));
+
+  // ── 张力 L（S↔D 之间的跨距）＋ R/H 的动作形态 ───────────────────
+  //   来由（安 2026-10-20 12:0x）：R 改成「让执行者直接全网查」，是可执行动作而非赋值；
+  //     H 定为观察者视角，在 S/D 制衡中选取；「SD 中间这个张力如何计算」⇒ 三档路由。
+  //   ⚠️ 只读：张力的「大小」只在档 A（有容差）存在；档 B 只出缺口清单，不带数值。
+  ctx.tools.register(defineTool({
+    name: 'query_tension',
+    description: 'S↔D 张力读数（只读）：算「标准要求」与「实际事项」之间的跨距 L。三档按域实际给了什么路由——档A（有容差）：L=|偏差|/容差，无量纲，单位是「几个容差」；档B（只有条款/动作）：输出**缺口清单**（要求的动作 − 允许的动作），集合差没有大小、永不带数值；档C（都拿不到）：不判（≠ 相容）。另返回 H 在张力上的位置形态（on_rail/off_low/off_high/zero_tension/unknown），其中 **zero_tension 是结构事实**：S 与 D 完全相容 ⇒ 跨距为零 ⇒ 杠杆没有跨度 ⇒ H 无处着力。另返回 R 的三层区分（本体无上限／域读数是投影／刻度 R=100 只便于计算）与后果级别对应的余量共识区间，以及条款的**形状**校验（只查槽位，不解析自然语言）。另返回 H 的裁量权归属（由第一视角自定、无上级授权者）与**升级判据**（判不出 ∧ 须追到责任人 ∧ 与责任人有关 ⇒ 返回人类做最终裁决；缺一条就停在 H，不交还），以及证据等级口径（二手不阻塞判决，待办 ≠ 欠账）。另判**本层尺子的来源**：传 citableToPublic 区分「公开标准原版（origin，可对外举证）」与「上一层转述（relay，只对本层生效、不得冒充原版）」——**R 不直达**：层内客观、跨层是投影，拿原版去交本层的差＝交错了尺子。另给**损耗归属**：转述/传递的损耗只能由 H 支付（R/S/D 无「承担后果」属性 ⇒ 无支付能力），传 relayLayers 可判方向——层数↑⇒总 H↑⇒M↓，减层就等于直接抬 M；损耗的根源是「接收方须重建语境」而非「信息丢失」。另给 **H 的通行许可**：传 runwayCovered 判这一处该不该「放开了跑，别怕，充分发挥自身优势」——跑道铺到处撤掉过度谨慎（那只是缺口利息）⇒ 损耗 H 退、总 H↓、M↑；没铺到则先沿已知边界跑。粒度按跑道覆盖、不按行业名；撤的是过度谨慎，**不是后果归属**。不产生 verdict、不进闸门。',
+    parameters: {
+      tol: { type: 'number', description: '档A：标准容差（与 dev 同单位）。例：医疗输液泵流量 ±5 ⇒ tol=5。' },
+      dev: { type: 'number', description: '档A：实际偏差（与 tol 同单位）。可负，张力取绝对值。' },
+      required: { type: 'array', items: { type: 'string' }, description: '档B：S 要求的动作集（标准条款要求做什么）。' },
+      allowed: { type: 'array', items: { type: 'string' }, description: '档B：D 允许的动作集（这次事项实际能做到什么）。' },
+      notchH: { type: 'number', description: 'H 选定档位对应的**绝对余量**（单位同 L：几个容差）。省略则不判位置。' },
+      rCap: { type: 'number', description: 'H 的**刻度读数**（百分制 ⇒ 80 表示 80%）。⚠️ 这是读数，不是上限：R 本体无上限，故不存在「rCap<1」这类要求。可由 criticality+notch 自动算出。' },
+      scale: { type: 'number', description: '刻度（默认 100＝百分制，即旧论文的 R=100）。换刻度只改读数、不得改判决。' },
+      criticality: { type: 'string', description: '后果级别（余量共识表的 key）：metrology_high_risk / aero_medical_derating / mil_industrial_derating / commercial_derating。给出则自动查余量区间并算 rCap。' },
+      notch: { type: 'string', description: 'H 选档：toward_s（更守标准，取余量大端）/ balanced（取区间中点）/ toward_d（更顺扰动，取小端）。' },
+      clauses: { type: 'array', items: { oneOf: [{ type: 'object', additionalProperties: true }, { type: 'string' }] }, description: '条款清单：只校验**形状**（action+object+value/unit成对+source+version），不解析自然语言。裸字符串会被判 unstructured。⚠️ 元素类型**刻意收窄到 object|string 两态**、不在 schema 层只许 object：形状校验是本工具的业务判据（判得出 structured / unstructured 两态），只许 object 则"裸字符串 ⇒ unstructured"这条读数永远走不到 ⇒ 校验被协议层代判，模型也看不到自己哪条不合格。' },
+      undecidable: { type: 'boolean', description: '升级第①条：这件事 H 判不出来吗？省略则不判升级（unknown ≠ 不必升级）。' },
+      mustTraceOwner: { type: 'boolean', description: '升级第②条：是否必须追到责任人？纯技术不可判、无需追责 ⇒ 停在 H。' },
+      relatesToOwner: { type: 'boolean', description: '升级第③条：是否与某个责任人有关？三条合取才返回人类。' },
+      citableToPublic: { type: 'boolean', description: '本层尺子的来源：这条要求能否指到「标准号+条款号+版本」的公开原文？true ⇒ origin（可对外举证）；false ⇒ relay（上一层转述，只对本层生效、不得冒充原版）。省略 ⇒ 不判来源（≠ origin）。⚠️ 判据不看行业名话术，只看"指不指得到"：公司→部门→管理者→你的链上，你拿到的是 relay，拿 origin 交差＝交错了尺子。' },
+      wants: {
+        type: 'string',
+        description: '你这次问 H 的哪一面（受控取值：who＝谁/资格/落款｜what_can＝能什么/档位/许可｜what_cost＝付多少/损耗｜visible＝外面能不能看到/缝）。🔴 H 是统称不是标量：不给 wants ⇒ 面向未定 ⇒ 返回 question_incomplete（可补，**不是判不出、也不是放行**）。给了 ⇒ 返回该面的判据。',
+      },
+      selfReadsAs: {
+        type: 'string',
+        description: '你打算拿哪一面的读数来答复 wants 那一面（同受控取值）。💰 两面不同 ⇒ crossFacet=true ＝ 跨面误推（造价），例：拿"产出风格一致"（visible）去答"他的动机"（who）。不给 ⇒ 不判跨面（≠ 不是跨面误推）。',
+      },
+      relayLayers: { type: 'number', description: '我这条链上有几层转述（0＝直接对接原始语境，1＝直属管理者，2＝部门+管理者…）。给出则返回损耗支付的**方向**：损耗只能由 H 支付（R/S/D 无"承担后果"属性 ⇒ 无支付能力），层数↑⇒总 H↑⇒M↓。**只给方向，不给 H 的数值**。省略 ⇒ 不判（≠ 无损）。' },
+      runwayCovered: { type: 'boolean', description: '这一处的**判据跑道铺到了吗**（不是"这个行业有没有标准"，是"这一处判据在不在"）。true ⇒ 发给执行者「放开了跑，别怕，充分发挥自身优势」：撤掉过度谨慎（那只是缺口利息），损耗 H 退出 ⇒ 总 H↓ ⇒ M↑；有效 H 不减。false ⇒ 先沿已知边界跑，不得卸谨慎（强卸测到的是缺口不是跑道）。⚠️ 粒度＝跑道覆盖范围，不按行业名。省略 ⇒ 不判许可（≠ 可以放开跑）。' },
+      inFormula: { type: 'boolean', description: '这个量**能不能进公式**（＝换个人照它走，能否落到同一份可复查的原件/记录）。true ⇒ 进，且它必是外 H（留痕强度再按 hard/soft 判）。false ⇒ 不在输入集 ⇒ 状态是 not_in_input_set（**不是欠账、不挂账**），并提示先问「能不能外化」。⚠️ 与 not_collected（在输入集但没采，是欠账）是两种不同的"没有"，必须分开。省略 ⇒ 不判（≠ 在内，也≠ 不在）。' },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute(args = {}) {
+      const out = {
+        action: { R: R_ACTION, H: H_OBSERVER },
+        audit: verbAudit(),
+      };
+      const t = tensionOf(args);
+      out.tension = t;
+
+      // R 的三层区分：本体无上限 / 读数是域的投影 / 刻度只是换算
+      out.R = { ontology: R_ONTOLOGY, scale: R_SCALE };
+
+      // 🔴 R 不直达：本层拿到的尺子是 origin 还是 relay（层内客观 ≠ 跨层直达）
+      out.relay = R_RELAY;
+      if (args.citableToPublic !== undefined) {
+        out.rSource = rSourceGrade({ citableToPublic: args.citableToPublic });
+      }
+
+      // 🔴 损耗只能由 H 支付：转述层数 ↑ ⇒ 总 H ↑ ⇒ M ↓（只判方向，不给数值）
+      out.loss = LOSS_BEARER;
+      // 张力输出的合法形状（档B 只允许缺口清单/不判；给比值即形状非法）
+      out.tensionOutput = TENSION_OUTPUT;
+
+      // 🔴 H 是统称（安 2026-10-20 20:3x）：先说清它有几个面，再看你问哪一面。
+      out.hUmbrella = H_UMBRELLA;
+      out.hFacets = H_FACETS;
+      // 内 H/外 H 之间那道缝（此前无落点）
+      out.seam = INNER_OUTER_SEAM;
+      // 🔴 公式准入律（安 2026-10-20 20:45）：能进公式的 H，全部是外 H
+      out.formulaInput = FORMULA_INPUT;
+      // 输入集自检：没给 ⇒ 不判（不默认"在内"）；false ⇒ 不进公式、不挂账
+      if (args.inFormula === true) {
+        out.formulaInputNow = {
+          inFormula: true,
+          tier: '一级：留痕 ⇒ 进（权重按 PROVENANCE_ATTESTATION 再判 hard/soft）',
+        };
+      } else if (args.inFormula === false) {
+        out.formulaInputNow = {
+          inFormula: false,
+          state: FORMULA_INPUT.states.NOT_IN_INPUT_SET,
+          bookkeeping: '不挂账（不是欠账）',
+          reroute: '先问「能不能外化」——补得成可留痕形态就是 not_collected，补不成才是内 H',
+        };
+      }
+      out.facetRule = FACET_DISCIPLINE;
+      if (args.wants !== undefined) {
+        out.facetNow = facetOf({ wants: args.wants });
+        // 跨面自检：本次问的是哪面、而查询里同时给了别的面的读数 ⇒ 提示但不阻断
+        if (args.selfReadsAs !== undefined) {
+          out.crossFacet = isCrossFacet({ asked: args.wants, read: args.selfReadsAs });
+        }
+      }
+      if (args.relayLayers !== undefined) {
+        out.lossRoute = lossRoute({ relayLayers: args.relayLayers });
+      }
+
+      // 🔴 H 的通行许可：跑道铺到处 ⇒ 放开了跑（撤过度谨慎，不是免后果归属）
+      out.permit = H_PERMIT;
+      if (args.runwayCovered !== undefined) {
+        out.permitNow = hPermitOf({ runwayCovered: args.runwayCovered });
+      }
+
+      // 余量档：查共识表（区间 ＋ 取端），不拍数
+      let rCap = args.rCap;
+      if (args.criticality) {
+        out.margin = MARGIN_CONSENSUS;
+        out.picked = pickMargin({ criticality: args.criticality, notch: args.notch });
+        if (rCap === undefined && out.picked.ok) {
+          const cap = notchCapOf({ criticality: args.criticality, notch: args.notch });
+          out.cap = cap;
+          if (cap.ok) rCap = cap.rCap;
+        }
+      }
+      if (args.notchH !== undefined || rCap !== undefined) {
+        out.position = slidePos({ tension: t, notchH: args.notchH, rCap, scale: args.scale });
+      }
+
+      // 条款形状（不做 NLP 抽取，只校验槽位）
+      if (Array.isArray(args.clauses)) {
+        const rows = args.clauses.map(checkClauseShape);
+        out.clauses = {
+          rows,
+          slots: CLAUSE_SLOTS,
+          summary: {
+            structured: rows.filter((r) => r.ok).length,
+            unstructured: rows.filter((r) => !r.ok).length,
+          },
+          note: 'unstructured 不是"判不出"，是**输入缺形状** ⇒ 该补槽位（可执行动作），不是落 review 的理由。',
+        };
+      }
+
+      // 🔴 H 的裁量权归属：由第一视角自己定；无上级授权者（否则嵌套不终止）
+      out.authority = {
+        h: H_AUTHORITY,
+        split: CAPACITY_VS_LIABILITY,
+        note: '裁量权可归 AI（H 自己判）；责任权唯人类。二者不可互代：判得出「谁有责任」≠「责任已裁定」。',
+      };
+
+      // 🔴 升级判据：不是「判不出就交还」，是三条合取
+      out.escalation = ESCALATION;
+      if ([args.undecidable, args.mustTraceOwner, args.relatesToOwner].some((v) => v !== undefined)) {
+        out.verdictEscalate = mustEscalate({
+          undecidable: args.undecidable,
+          mustTraceOwner: args.mustTraceOwner,
+          relatesToOwner: args.relatesToOwner,
+        });
+      } else {
+        out.verdictEscalate = { verdict: ESCALATE.UNKNOWN, ok: false, reason: '未给三条中任一条 ⇒ 不判（≠ 不必升级）' };
+      }
+
+      // 🔴 二手来源不阻塞：待办 ≠ 欠账
+      out.evidence = EVIDENCE_LIFECYCLE;
+      // 🔴 实测补的（2026-10-20 E2）：provenance 能不能被别人照着核
+      out.provenance = PROVENANCE_ATTESTATION;
+
+      out.note = '只读面：张力只是 S↔D 的跨距，**不是 M 的值**。档B 不参与比值（集合差没有大小）。zero_tension ≠ 通过，它表示「照标准做就行、不需要能动性」。🔴 R=100 是**刻度**不是上限（R 本体无上限）；rCap 是读数，不是界。🔴 H 的取值由第一视角自己定、无上级授权者；升级唯一出口=「判不出 ∧ 须追责 ∧ 与责任人有关」。🔴 **R 不直达**：本层（部门/管理者/主审）手上的尺子是 origin 还是 relay 决定该查什么；放行由上一层给，自评 M 通过不构成放行。🔴 **损耗只能由 H 支付**（唯一主动项）：转述层数↑⇒总 H↑⇒M↓；但优化方向是**移项**（把 H 从零收益的复述处移到正收益的判断处），不是"减少 H"——H=0 违反 `0 <`。🔴 **H 也是通行许可**：「放开了跑，别怕」是给执行者的**指令形态**（不是取值）⇒ 跑道铺到处才发；放开＝把损耗 H 退掉 ⇒ 总 H↓ ⇒ M↑，**不是 H 变大**。';
+      return out;
     },
   }));
 }
