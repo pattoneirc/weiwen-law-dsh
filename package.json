@@ -15,6 +15,7 @@
     "!src/core/_engine_base_*",
     "weiwen-law.patch.yml",
     "README.md",
+    "ONBOARDING.md",
     "DESIGN.md",
     "LICENSE",
     "examples",
