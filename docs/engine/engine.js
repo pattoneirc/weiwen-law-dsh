@@ -1251,6 +1251,12 @@ export class WeiwenLawEngine {
     this.anchorChannel = { utteranceSeen: false, principalAnchorSeen: false, lastPrincipalAnchor: null, poolPaths: [], poolNouns: [] };
     // [2026-09-24 · 按链修补] 本次裁决的传导链落点（R→S→D→H→M）；每次 decideToolCall 重建。
     this.conduction = [];
+    // 🔴 [2026-10-27 · 治量具自指] 裁决史（含被裁工具名）。
+    //   只存"最近一次"＝结构性自指：审计工具自己也要过闸，它一过闸就把"最近一次"覆盖成自己，
+    //   于是它读到的是**自己**的链（小D 实测：glob→deny 之后查链，报出的是 allow/law:推演）。
+    //   ⇒ 存历史，由上层按"是否自查工具"过滤（引擎不做词形判断，只如实记事实）。
+    this.conductionHistory = [];
+    this._conductionSeq = 0;
   }
 
   // ---------- S 稳态储备：双重属性（时间刻痕不可逆 + 当前值可升降） ----------
@@ -1867,7 +1873,55 @@ export class WeiwenLawEngine {
       note: `${res.kind} / ${res.law ?? '-'}：${res.reason ?? ''}`,
     });
     res.conduction = this._conductionSnapshot(); // 统一挂链落点（按 R→S→D→H→M 输出）
+    this._recordConduction(call, res, res.conduction); // 裁决史（治量具自指，见方法首部）
     return this._attachInnerH(res, call);
+  }
+
+  // ---------- 裁决史：让量具看得见被测量（2026-10-27 · 小D 实测逼出） ----------
+  // 病灶（一句话）：**只存"最近一次"的观测位，遇到"观测本身也要过闸"时必然自指。**
+  //   实测序列：glob --deny/R--> 接着 query_conduction_chain --allow-->
+  //   查询读到的却是「allow / law:推演 / layer=file-read / vacuum / 未触任何锚」
+  //   —— 那不是上一次拒绝的链，是**查询自己这一次**的链。量具把自己量进去了。
+  // 为什么不是"查询前抓快照"就能了：快照也有"谁抓的"问题，且抓快照这个动作本身要不要过闸？
+  //   ⇒ 结构解不是"抢在污染前读"，是**让被污染与未被污染的分开存**，读的时候按性质取。
+  // 分层（关键，别把层别搞乱）：
+  //   引擎不知道"哪些工具是自查工具"（那是插件注册时才知道的知识）⇒ 引擎只**如实记录**（含 tool 名）。
+  //   过滤谁，由 index.js 侧显式登记的集合决定 ⇒ 引擎侧不认 `query_` 前缀（词形＝枚举，会漏新工具）。
+  _recordConduction(call, res, snapshot) {
+    if (!Array.isArray(this.conductionHistory)) this.conductionHistory = [];
+    this._conductionSeq = (this._conductionSeq ?? 0) + 1;
+    this.conductionHistory.push({
+      seq: this._conductionSeq,
+      tool: call?.name ?? null,
+      kind: res?.kind ?? null,
+      law: res?.law ?? null,
+      at: new Date().toISOString(),
+      conduction: snapshot,
+    });
+    // 环形上限：只保留最近 32 步可回溯。
+    // ⚠️ 这不是"只记 32 次裁决"——账本本体（S 刻痕 / bugKey 计数 / mMark）另存，不受本上限约束。
+    //   此处限的只是"链落点的可回看深度"，不要读成"历史丢了"。
+    const CAP = 32;
+    if (this.conductionHistory.length > CAP) {
+      this.conductionHistory.splice(0, this.conductionHistory.length - CAP);
+    }
+  }
+
+  /**
+   * 取"最近一次**不属于 excludeTools** 的裁决"。
+   * @param {Set<string>|string[]} [excludeTools] 要跳过的工具名（自查/审计类）
+   * @returns {{seq:number, tool:string, kind:string, law:string|null, at:string, conduction:Array}|null}
+   *   找不到时返回 null —— **null 是正向读数（"还没有可看的裁决"），不是错误**。
+   *   ⚠️ 不要把 null 兜成"最近一次"：那等于自指复发。
+   */
+  lastConductionExcluding(excludeTools = new Set()) {
+    const skip = excludeTools instanceof Set ? excludeTools : new Set(excludeTools);
+    const hist = Array.isArray(this.conductionHistory) ? this.conductionHistory : [];
+    for (let i = hist.length - 1; i >= 0; i -= 1) {
+      const e = hist[i];
+      if (!skip.has(e.tool)) return e;
+    }
+    return null;
   }
 
   // ---------- 出口统一终局落点（2026-09-24 · 偏差修正 · 结构修法，不枚举分支） ----------

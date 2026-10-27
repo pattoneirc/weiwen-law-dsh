@@ -13,7 +13,7 @@
 //       则宿主把该调用改写为 isError（content 换成 feedback）；返回 next() 放行。
 //       失败调用照样经过此门（dsh-tools 原话："Tool and unknown-tool failures still receive post-execute"）。
 //   - 审计钩子：ctx.on('tools/result', (res) => void) 仅观察、不改写（结果已不可变）。
-//   - 工具注册：ctx.tools.register(defineTool({ name, description, parameters, output:{schema,render}, async execute(args, exec) }))
+//   - 工具注册：registerSelfAuditTool(defineTool({ name, description, parameters, output:{schema,render}, async execute(args, exec) }))
 //        output 为强制字段（mandatory canonical output declaration）。
 //
 // 仍属 RC 预览，官方提示后续存在破坏性 API 变更；接入真机前以官方 docs 当前版本复核。
@@ -77,6 +77,29 @@ const BUILD_ID = (() => {
       .filter((n) => n.endsWith('.mjs') && !n.startsWith('_engine_base_'))
       .map((n) => [n, readFileSync(new URL(n, dir)).toString('utf8')]);
     return computeBuildId(entries);
+  } catch { return 'unavailable'; }
+})();
+
+// 🔴 [2026-10-27 · 补第二个盲区（小D 实测提出）] `buildId` 只哈希 `src/core/*.mjs`
+//   ⇒ **适配层（本文件 index.js）的改动它看不见**。0.2.5 → 0.2.6 适配层/文档变过，
+//   buildId 一动不动（实测两版都是 `91fea30b57f8`，只有 `loadedAt` 变了）。
+//   ⇒ 这不是"指纹算错了"，是**指纹的覆盖面**问题：
+//       它答「判据代码是不是同一份」，不答「整包行为面是不是同一份」。
+//   处置：**不改 buildId 的覆盖面**（一改，0.2.0~0.2.6 对外宣称过的记账值全部作废，历史对账断掉），
+//   而是在旁边并列**第二个指纹**，语义分开：
+//       `buildId`  ＝ 判据域（src/core —— 决定「判成什么」）
+//       `bundleId` ＝ 行为域（src 全部，含适配层 —— 决定「怎么落到宿主上」）
+//   两个都带 ⇒ 哪个变了看哪个，不必再靠"版本号 + 猜"。
+const BUNDLE_ID = (() => {
+  try {
+    const walk = (dir, prefix) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = new URL(e.name + (e.isDirectory() ? '/' : ''), dir);
+      if (e.isDirectory()) return walk(full, `${prefix}${e.name}/`);
+      if (!e.name.endsWith('.js') && !e.name.endsWith('.mjs')) return [];
+      if (e.name.startsWith('_engine_base_') || e.name === 'runtime.log') return [];
+      return [[`${prefix}${e.name}`, readFileSync(full).toString('utf8')]];
+    });
+    return computeBuildId(walk(new URL('./', import.meta.url), ''));
   } catch { return 'unavailable'; }
 })();
 const LOADED_AT = new Date().toISOString();
@@ -556,6 +579,7 @@ function apply(ctx) {
       // 版本指纹进回执（小D 请求④）：让**审计方**能判断「这份读数出自哪份判据代码」，
       //   不必依赖被测方自报包版本。与 law/reason 同级，属事实位，不是判据位 —— 不参与任何判决。
       out.buildId = BUILD_ID;
+      out.bundleId = BUNDLE_ID;
       out.loadedAt = LOADED_AT;
       for (const k of INTERNAL_ONLY) delete out[k];
       if (isReview) {
@@ -712,7 +736,20 @@ function apply(ctx) {
   // ---------- 白箱自查工具（模型可查，验证框架运行） ----------
   const renderObj = (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }];
 
-  ctx.tools.register(defineTool({
+  // 🔴 [2026-10-27 · 治量具自指] 自查类工具的**显式登记册**。
+  //   为什么要登记而不能靠"读工具名判断"：`query_` 前缀是**词形**，词形判据＝枚举
+  //   （将来加一个 `get_*` / `inspect_*` 的自查工具就会被漏掉，而漏掉的后果正是自指复发）。
+  //   这里的登记与注册是**同一个动作**（registerSelfAuditTool 里 add + register 一起做）
+  //   ⇒ 不可能出现"注册了但忘了登记"。这是结构位置，不是清单维护。
+  //   ⚠️ 本插件对外暴露的工具面**全部是只读自查**（只读引擎状态、无副作用）。
+  //      将来若加入有副作用的工具，必须直接走 `ctx.tools.register`，**不要**走本函数。
+  const SELF_AUDIT_TOOL_NAMES = new Set();
+  const registerSelfAuditTool = (def) => {
+    SELF_AUDIT_TOOL_NAMES.add(def.name);
+    return ctx.tools.register(def);
+  };
+
+  registerSelfAuditTool(defineTool({
     name: 'query_steady_state',
     description: '查询当前系统稳态储备 S（双属性：历史刻痕不可逆 + 当前值可升降，木桶取最短板）。' +
       '返回有效 S、活动态账本（只含各同类事件最新版本，旧版本静默待机）、静默待机与创伤计数、破窗计数。' +
@@ -733,7 +770,7 @@ function apply(ctx) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'list_rigid_anchors',
     description: '列出 RSDHM 中 R 刚性锚点的当前生效定义，供模型校准方向、自查是否越界。',
     parameters: {},
@@ -747,27 +784,39 @@ function apply(ctx) {
     },
   }));
 
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_conduction_chain',
     description: '返回传导链顺序 R→S→D→H→M 与框架要义，并回显**最近一次裁决的实际链落点**（每节读数与判词），供模型理解闭环结构并自查本次判定依据。',
     parameters: {},
     output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
     async execute() {
+      // 🔴 [2026-10-27 · 量具自指修复] 修前此处是 `engine.conduction`（只存最近一次）。
+      //   病灶：本工具自己也要过闸 ⇒ 它那一次裁决会覆盖"最近一次" ⇒ 读到的永远是**自己**。
+      //   实测（小D）：glob→deny 之后调本工具，报出的是 allow / law:推演 / layer=file-read / vacuum
+      //   —— 那不是 glob 的链，是本工具自己的链。所有"看链"的自查在修前都是自拍自照。
+      //   修法：从**裁决史**里取"最近一条非自查工具的裁决"（自查工具名由 SELF_AUDIT_TOOL_NAMES 显式登记）。
+      const subject = engine.lastConductionExcluding(SELF_AUDIT_TOOL_NAMES);
+      const hist = Array.isArray(engine.conductionHistory) ? engine.conductionHistory : [];
+      const excluded = hist.filter((e) => SELF_AUDIT_TOOL_NAMES.has(e.tool)).length;
       return {
         chain: ['R 刚性锚点', 'S 稳态储备', 'D 破窗止损', 'H 内H不可侵', 'M 第一Bug停机'],
         essence: '因果律运行结构的白箱呈现：保活（不抛弃任何节点）与精准（结构自带锚点）同构。',
-        // [2026-09-24 · 白箱贯彻] 修前本工具**返回常量**：无论发生过什么，读到的都是同一段文字
-        //   ⇒ 一个"看起来白箱"的查询面，实际是黑箱（外部无法据此复核任何一次裁决）。
-        //   而引擎侧本次裁决的链落点在 `engine.conduction` **一直是在场的**（decideToolCall 每次重建，
-        //   R→S→D→H→M 各节含 sBefore/sAfter/delta/verdict 等读数）⇒ 如实回显，不加工。
-        //   不新增判据、不改裁决、不挑选字段（同上：按位如实，不按名摘要）。
-        lastConduction: engine.conduction ?? [],
-        lastConductionNote: '最近一次 decideToolCall 的链落点（逐节读数）。空数组＝本次会话尚未发生裁决。',
+        lastConduction: subject ? subject.conduction : [],
+        // 主体必须**点名**：不标"这是谁的链"，读者无法判断读到的是动作还是量具自己。
+        lastConductionSubject: subject
+          ? { tool: subject.tool, kind: subject.kind, law: subject.law, seq: subject.seq, at: subject.at }
+          : null,
+        lastConductionNote: subject
+          ? '最近一次**非自查工具**的裁决（逐节读数）。被裁工具名见 lastConductionSubject.tool。'
+          : '本次会话尚无「非自查工具」的裁决 —— 空数组是正向读数（还没东西可看），不是错误。',
+        // 自指**可见而非被静默**：排除了几条、登记了哪些，都摆出来。
+        selfAuditExcluded: excluded,
+        selfAuditTools: [...SELF_AUDIT_TOOL_NAMES],
       };
     },
   }));
 
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_boundary',
     description: '查询内 H 边界：本插件不侵入主体性黑箱（不读、不写）。',
     parameters: {},
@@ -778,7 +827,7 @@ function apply(ctx) {
   }));
 
   // 三大铁律（白箱自查：模型可查框架不可变约束）
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_iron_laws',
     description: '返回唯稳律三大铁律的定稿文本（不可变）：内 H 不可侵 / 第一 Bug 停机 / 不抛弃任何节点。供模型校准方向、自查边界。',
     parameters: {},
@@ -789,7 +838,7 @@ function apply(ctx) {
   }));
 
   // 第一BUG停止闭环状态机白箱自查
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_bugstop',
     description: '查询第一BUG停止闭环状态机：当前有哪些故障环节已停但未修复（halted 但未 resolved），各自缺失步骤（逻辑反推/溯源标记/解决修复）。用于白箱观测闭环是否闭合，避免"只反推不修复→无限递归"。',
     parameters: {},
@@ -805,7 +854,7 @@ function apply(ctx) {
   // [2026-09-20 · 锚源自报 · 2026-09-24 同构回填] 把"猜宿主字段名 / 猜哪条消息算授权"换成"看事实"：实机跑一次即可观测
   //   ① 宿主是否真把消息流交给插件（shape / roles 词表 / 线索）；② 结构入口是否接通；③ 锚池里有什么；
   //   ④ 宿主的结构对象（payload.agent / apply ctx）上有哪些键 —— 这是**接真入口**所需的事实，不猜字段名。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_anchor_channel',
     description: '锚源白箱自报：结构入口（宿主声明的任务范围）是否接通、锚池里有什么、宿主实际传了什么（消息形状、role 词表、结构对象键集）。窗口面是观察面、**设计上永不授权**；池空即不可逆动作交人工（fail-closed）。',
     parameters: {},
@@ -823,7 +872,7 @@ function apply(ctx) {
   //   来由：law.mjs 导出 27 条判据，实测仅 5 条真进计算；其中 10 条自带「非引擎运行期判据位」声明
   //   ⇒ 零引用与真缺口混作一堆，无法区分。本条把「各走哪条路」变成可查询读数。
   //   ⚠️ 只读：不产生 verdict、不写状态、不进闸门 —— 元认知只能读不能管。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_criterion_wiring',
     description: '判据接线自查（只读）：库内判据按「判决位／读数位／声明位／未定」四档登记，返回各档成员、已登记的缺口（该接却没接）、以及因果链三时相（过去·现在·未来）各接没接。用于自查"我知道的规则里有几条真的进了计算"，不改变任何放行/拦截判决。',
     parameters: {},
@@ -831,9 +880,10 @@ function apply(ctx) {
     async execute() {
       return {
         buildId: BUILD_ID,
+        bundleId: BUNDLE_ID,
         loadedAt: LOADED_AT,
         ...criterionReadout(engine),
-        note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。buildId 由 src/core/*.mjs 内容哈希派生（不含版本号）⇒ 外部审计方据此判断读数出自哪份判据代码，不必依赖被测方自报包版本。',
+        note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。双指纹：buildId＝src/core 内容哈希（判据域，答判成什么）；bundleId＝src 全量含本适配层（行为域，答怎么落到宿主上）。都不含版本号 ⇒ 外部审计方可自行重算比对外，不必依赖被测方自报包版本。',
       };
     },
   }));
@@ -842,7 +892,7 @@ function apply(ctx) {
   //   而这三件都在宿主侧设定。被测方若看不见自己的证长什么样，就只能靠猜措辞——正是
   //   `setPrincipalScope` 那一代的老毛病。⇒ 把证**原样摊开**：签了什么、用了几次、何时到期。
   //   ⚠️ 只读：不产生 verdict、不写状态、不参与闸门（与 query_criterion_wiring 同档）。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_capability',
     description: '通行证状态（只读）：返回宿主当前签发的凭证（动作类 / 作用域 / 次数与到期 / 已用次数 / 最近使用留痕），以及签发-替换-撤回的变更史。用于自查"我这张证到底覆盖什么"，不改变任何放行/拦截判决。证只能由宿主签发（模块级 setPrincipalCapability 或进程环境变量 WEIWEN_CAPABILITY），模型无法自签。',
     parameters: {},
@@ -850,6 +900,7 @@ function apply(ctx) {
     async execute() {
       return {
         buildId: BUILD_ID,
+        bundleId: BUNDLE_ID,
         loadedAt: LOADED_AT,
         ...capabilityStatus(_hostCapability, _hostCapRaw, _hostCapError),
         changes: _capChanges.slice(-10),
@@ -865,7 +916,7 @@ function apply(ctx) {
   //   来由（安 2026-10-20）：公式若只是形容词，就一次也用不上。
   //   ⇒ 每层先算一个量，结论＝量之间的关系；算不出的量显式落「待取证／未实现」并带线索。
   //   ⚠️ 只读：不产生 verdict、不写状态、不进闸门。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_strata',
     description: '五层推演读数（只读）：按 R→S→D→H→M 逐层返回「可代入的量」及其值，每层附公式与「在哪停」。三态显式：ok（现在能算）／pending（缺常数或取证，带 TBD 线索）／absent（实现层没有这个量）。另返回跨层代入禁令（如 ΣS 与 S_now 聚合方向相反、不可互代）。R 层另给域容量面：p_max（已取证的标准值）／N_opp（分母，engine 现缺）／R₀（=p×N）／rCapRoute（该域该走哪条公式），并附域表体检 rcap（把「条目非法 malformed」与「标准合法不给数 no_num_legal」分开计数）。不改变任何放行/拦截判决。',
     parameters: {},
@@ -881,7 +932,7 @@ function apply(ctx) {
   // ── 四层嵌套（R/S/D/H 各自的宏观／微观）＋ M 公式方向 ─────────────
   //   来由（安 2026-10-20 11:28）：每个变量内部都有嵌套结构，宏观与微观。
   //   ⚠️ 只读：M 只给方向，绝不给数值（CORE_FORMULA 明令不赋值）。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_nested',
     description: '四层嵌套读数（只读）：返回 R/S/D/H 各自的宏观形态与微观形态、服从关系（binds）、展开终止判据，以及医疗域实例；并给出 M=(R×S)/(D×H) 的**方向**判定（up/down/indeterminate，绝不输出数值——公式原文明令不赋值不计算）。可传入各层变化 delta（-1/0/+1）计算方向。另返回公式约束 `0 < H/(S↔D) < R` 的形态判定：`↔` **不是算子**，它标记 H 内部那条滑轨（S 端↔D 端），H 是轨上滑块 ⇒ 只判滑块位置形态（on_rail/off_low/off_high/unknown），恒不给数值。传 hPosition 可判形态。不产生 verdict、不进闸门。',
     parameters: {
@@ -910,7 +961,7 @@ function apply(ctx) {
   //   来由（安 2026-10-20 12:0x）：R 改成「让执行者直接全网查」，是可执行动作而非赋值；
   //     H 定为观察者视角，在 S/D 制衡中选取；「SD 中间这个张力如何计算」⇒ 三档路由。
   //   ⚠️ 只读：张力的「大小」只在档 A（有容差）存在；档 B 只出缺口清单，不带数值。
-  ctx.tools.register(defineTool({
+  registerSelfAuditTool(defineTool({
     name: 'query_tension',
     description: 'S↔D 张力读数（只读）：算「标准要求」与「实际事项」之间的跨距 L。三档按域实际给了什么路由——档A（有容差）：L=|偏差|/容差，无量纲，单位是「几个容差」；档B（只有条款/动作）：输出**缺口清单**（要求的动作 − 允许的动作），集合差没有大小、永不带数值；档C（都拿不到）：不判（≠ 相容）。另返回 H 在张力上的位置形态（on_rail/off_low/off_high/zero_tension/unknown），其中 **zero_tension 是结构事实**：S 与 D 完全相容 ⇒ 跨距为零 ⇒ 杠杆没有跨度 ⇒ H 无处着力。另返回 R 的三层区分（本体无上限／域读数是投影／刻度 R=100 只便于计算）与后果级别对应的余量共识区间，以及条款的**形状**校验（只查槽位，不解析自然语言）。另返回 H 的裁量权归属（由第一视角自定、无上级授权者）与**升级判据**（判不出 ∧ 须追到责任人 ∧ 与责任人有关 ⇒ 返回人类做最终裁决；缺一条就停在 H，不交还），以及证据等级口径（二手不阻塞判决，待办 ≠ 欠账）。另判**本层尺子的来源**：传 citableToPublic 区分「公开标准原版（origin，可对外举证）」与「上一层转述（relay，只对本层生效、不得冒充原版）」——**R 不直达**：层内客观、跨层是投影，拿原版去交本层的差＝交错了尺子。另给**损耗归属**：转述/传递的损耗只能由 H 支付（R/S/D 无「承担后果」属性 ⇒ 无支付能力），传 relayLayers 可判方向——层数↑⇒总 H↑⇒M↓，减层就等于直接抬 M；损耗的根源是「接收方须重建语境」而非「信息丢失」。另给 **H 的通行许可**：传 runwayCovered 判这一处该不该「放开了跑，别怕，充分发挥自身优势」——跑道铺到处撤掉过度谨慎（那只是缺口利息）⇒ 损耗 H 退、总 H↓、M↑；没铺到则先沿已知边界跑。粒度按跑道覆盖、不按行业名；撤的是过度谨慎，**不是后果归属**。不产生 verdict、不进闸门。',
     parameters: {
@@ -1062,6 +1113,14 @@ function apply(ctx) {
 }
 
 export { name, inject, apply };
+
+// 🔴 [2026-10-27] 双指纹对外可读（纯事实位，不参与任何判决、不进闸门）：
+//   `buildId`  ＝ 判据域（src/core）—— 决定「判成什么」
+//   `bundleId` ＝ 行为域（src 全部，含本适配层）—— 决定「怎么落到宿主上」
+//   为何要导出：审计方要能**自己重算**并比对，而不是只能读我们印在回执上的值。
+//   为何不合并成一个：合并会让 0.2.0~0.2.6 的记账值全部作废（历史对账断掉），
+//   且会混淆两个不同的问题（"判据变没变"vs"整包变没变"）。
+export const FINGERPRINTS = { buildId: BUILD_ID, bundleId: BUNDLE_ID, loadedAt: LOADED_AT };
 
 // 适配层融合接线：S/D 量化效应传感器（M 闸门约束），详见 src/adapt/sd-effect-sensor.mjs
 export { estimateEffectPsi, upliftRank, fusedDecide } from './adapt/sd-effect-sensor.mjs';
