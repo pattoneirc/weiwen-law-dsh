@@ -289,7 +289,7 @@ export DEEPSEEK_API_KEY=sk-xxxx     # Linux/macOS
 
 ```bash
 # 从 npm 安装 —— **对外唯一安装入口**，钉住版本号（不要用 latest）
-dsh plugin --profile web add "dsh-weiwen-law@0.2.4"
+dsh plugin --profile web add "dsh-weiwen-law@0.2.5"
 
 # 重启生效
 dsh --profile web
