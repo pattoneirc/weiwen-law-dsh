@@ -45,10 +45,10 @@ const CORE = (dir) => readdirSync(dir)
 // ── 记账本：取最后一条 ────────────────────────────────────────────────────
 function lastRecord() {
   const txt = readFileSync(join(ROOT, 'RELEASES.md'), 'utf8');
-  const rows = [...txt.matchAll(/^\|\s*`?(0\.\d+\.\d+)`?\s*\|\s*`?([0-9a-f]{7,40})`?\s*\|\s*`?([0-9a-f]{12})`?\s*\|\s*`?([0-9a-f]{40})`?\s*\|\s*([\d-]+)\s*\|/gm)];
+  const rows = [...txt.matchAll(/^\|\s*`?(0\.\d+\.\d+)`?\s*\|\s*`?([0-9a-f]{7,40})`?\s*\|\s*`?([0-9a-f]{12})`?\s*\|\s*(?:`?([0-9a-f]{12})`?|—|-|N\/A)\s*\|\s*`?([0-9a-f]{40})`?\s*\|\s*([\d-]+)\s*\|/gm)];
   if (!rows.length) throw new Error('RELEASES.md 里没有可解析的发布记录');
   const r = rows[rows.length - 1];
-  return { version: r[1], gitSha: r[2], buildId: r[3], shasum: r[4], date: r[5] };
+  return { version: r[1], gitSha: r[2], buildId: r[3], bundleId: r[4] ?? null, shasum: r[5], date: r[6] };
 }
 
 // ── ① npm 上此刻的那一份（真下载，不看自报）───────────────────────────────

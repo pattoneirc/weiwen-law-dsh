@@ -15,15 +15,16 @@
 
 ## 台账
 
-| 版本 | git 提交 | buildId（规范化口径） | tarball shasum | 发布日期 | 备注 |
-|---|---|---|---|---|---|
-| 0.2.0 | 874fe04 | 1acb76f62a8e | 02da3d4f2ae4531f9a54278068f97576768f4b7a | 2026-10-26 | buildId 自 0.2.1 起才有；本行为事后按内容确证补记 |
-| 0.2.1 | fdef440 | 6d3e2e6e58c9 | ffe361117766d963ad5f97154e1393ea83df9c86 | 2026-10-27 | 当时宣称 `07ac562e3a8f`（旧口径） |
-| 0.2.2 | 2259181 | a54caf247180 | 188950f4c041fdf8bd063204baeebe22c0a7b7e5 | 2026-10-27 | 当时宣称 `ea64c6f51c41`（旧口径）；通行证落码 |
-| 0.2.3 | ce5de6a | 91fea30b57f8 | 70195ccae85fea180b47b57cdb73372881524fbf | 2026-10-27 | 当时宣称 `8e8604efd2cf`（旧口径）；修凭证计数键 |
-| 0.2.4 | — 未发布 — | — | — | — | registry 侧存在该版本的 staged 残留，publish 恒 409（`Cannot publish over previously staged version`），但 versions 列表查不到它。本机 npm 10.9.7 无 stage 子命令，无法自查。**该版本号作废，不要使用** |
-| 0.2.5 | 3c7f944 | 91fea30b57f8 | 0721e0544c27b63140beb066c472c99ed2492d33 | 2026-10-27 | 规范化口径**首个**版本；与 0.2.3 同指纹 —— core 判据代码没变，改的是「怎么算指纹」＋文档/记账。**同指纹＝同判据代码，不是没更新** |
-| 0.2.6 | 9dcd82b | 91fea30b57f8 | 07b31200075d25c4af237cb33ba031ef7b42d171 | 2026-10-27 | **纯文档版**：`ONBOARDING.md` 三态→四态（review① 待补料 / ② 交还）、`WALLS.md` 补第 ⑧ 号墙 ＋ 新增「它在账本里的位置」、README 入口改三份映射。**判据代码一行未动** ⇒ 与 0.2.3 / 0.2.5 同指纹。包内 `ONBOARDING.md` 9433B、`WALLS.md` 7833B，与工作区逐字一致 |
+| 版本 | git 提交 | buildId（判据域） | bundleId（行为域） | tarball shasum | 发布日期 | 备注 |
+|---|---|---|---|---|---|---|
+| 0.2.0 | 874fe04 | 1acb76f62a8e | — | 02da3d4f2ae4531f9a54278068f97576768f4b7a | 2026-10-26 | buildId 自 0.2.1 起才有；本行为事后按内容确证补记 |
+| 0.2.1 | fdef440 | 6d3e2e6e58c9 | — | ffe361117766d963ad5f97154e1393ea83df9c86 | 2026-10-27 | 当时宣称 `07ac562e3a8f`（旧口径） |
+| 0.2.2 | 2259181 | a54caf247180 | — | 188950f4c041fdf8bd063204baeebe22c0a7b7e5 | 2026-10-27 | 当时宣称 `ea64c6f51c41`（旧口径）；通行证落码 |
+| 0.2.3 | ce5de6a | 91fea30b57f8 | — | 70195ccae85fea180b47b57cdb73372881524fbf | 2026-10-27 | 当时宣称 `8e8604efd2cf`（旧口径）；修凭证计数键 |
+| 0.2.4 | — 未发布 — | — | — | — | — | registry 侧存在该版本的 staged 残留，publish 恒 409（`Cannot publish over previously staged version`），但 versions 列表查不到它。本机 npm 10.9.7 无 stage 子命令，无法自查。**该版本号作废，不要使用** |
+| 0.2.5 | 3c7f944 | 91fea30b57f8 | — | 0721e0544c27b63140beb066c472c99ed2492d33 | 2026-10-27 | 规范化口径**首个**版本；与 0.2.3 同指纹 —— core 判据代码没变，改的是「怎么算指纹」＋文档/记账。**同指纹＝同判据代码，不是没更新** |
+| 0.2.6 | 9dcd82b | 91fea30b57f8 | — | 07b31200075d25c4af237cb33ba031ef7b42d171 | 2026-10-27 | **纯文档版**：`ONBOARDING.md` 三态→四态（review① 待补料 / ② 交还）、`WALLS.md` 补第 ⑧ 号墙 ＋ 新增「它在账本里的位置」、README 入口改三份映射。**判据代码一行未动** ⇒ 与 0.2.3 / 0.2.5 同指纹。包内 `ONBOARDING.md` 9433B、`WALLS.md` 7833B，与工作区逐字一致 |
+| 0.2.7 | 98a0b93 | 870ab94e913f | dc581d1fbdfe | 58ceb041ff9a30bc90f227acf241f01e65fea3c8 | 2026-10-27 | **行为变更（不是文档版）**：治「量具自指」——修前 `query_conduction_chain` 读 `engine.conduction`（只存最近一次），而查询工具自己也要过闸 ⇒ 它读到的是**自己**。改 `conductionHistory`（32 步）+ `lastConductionExcluding()` + 适配层显式登记册；`lastConduction` 语义变为「最近一次非自查裁决」，并新增 `lastConductionSubject` / `selfAuditExcluded` / `selfAuditTools`。同批补第二个指纹 `bundleId`（src 全量含适配层），并回填本列。546/546。 |
 
 ## 各版本对应的提交是怎么确证的（不是靠记性）
 
