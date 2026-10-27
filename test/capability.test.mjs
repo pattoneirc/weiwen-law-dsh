@@ -257,4 +257,16 @@ test('证是当前有效量（替换不累积）：不同证各自计数，不�
   const y = cap({ id: null, maxUses: 1 });
   consume(x, { action: 'write', targets: [] });
   assert.equal(usesOf(y), 1);
+  // 🔴 同 id 换内容 ⇒ 计数从 0 起（替换不累积在**计数维度**上的落点）
+  //   病灶（0.2.2 真装探针实测）：键只认 id ⇒ 宿主固定 id 重签 ⇒ 新证一签发就"已用尽"⇒ 全量 review。
+  //   方向虽更严，但换掉的授权还挂着旧账 ⇒ 替换语义被打穿，且会让人误判"证不管用"。
+  resetCapabilityUsage();
+  const oldOne = cap({ id: 'same', maxUses: 1 });
+  consume(oldOne, { action: 'write', targets: [] });
+  assert.equal(usesOf(oldOne), 1);
+  const renewed = cap({ id: 'same', maxUses: 2 });      // 同 id、改了次数
+  assert.equal(usesOf(renewed), 0, '同 id 换内容必须是新证，不得继承旧计数');
+  assert.notEqual(capabilityKey(oldOne), capabilityKey(renewed));
+  // 同 id 同内容仍是同一张证（重复解析/重复下发不得变成新证逃过计数）
+  assert.equal(capabilityKey(cap({ id: 'same', maxUses: 2 })), capabilityKey(renewed));
 });

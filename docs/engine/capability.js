@@ -261,12 +261,24 @@ export function parseCapability(input) {
 const USE_LEDGER_CAP = 20;
 const _uses = new Map();   // key -> {count, log:[{at,action,targets}]}
 
-/** 证的稳定键：有 id 用 id；无 id 用内容指纹（同内容＝同证，计数合并） */
+/**
+ * 证的稳定键：**内容指纹恒参与**，`id` 只作可读前缀。
+ *   ⇒ 同 id 同内容 ⇒ 同键（就是同一张证，计数当然合并）；
+ *      同 id 换了内容（改作用域/改次数/改到期）⇒ 新键 ⇒ **计数从 0 起**。
+ *
+ * 🔴 为什么不能"有 id 就只认 id"（0.2.2 实测踩到，真装探针复现）：
+ *   宿主习惯用固定 id（`xiaod-001`）重签新证，若键只认 id ⇒ 旧证的用量被新证继承
+ *   ⇒ **新证一签发就显示"已用尽"** ⇒ 全量转 review。
+ *   方向虽然是"更严"（不会误放行），但它把「替换不累积」这条硬约束在计数维度上打穿了：
+ *   换掉的授权不该还挂着旧账。⇒ 键必须含内容，替换才是真替换。
+ */
 export function capabilityKey(cap) {
   if (!cap) return '';
-  if (cap.id) return 'id:' + cap.id;
-  return 'anon:' + cap.actions.join(',') + '|' + cap.scope.map((s) => s.kind + ':' + s.value).join(',')
-    + '|' + String(cap.maxUses) + '|' + String(cap.expiresAt);
+  const body = [...cap.actions].sort().join(',')
+    + '|' + cap.scope.map((s) => s.kind + ':' + s.value).sort().join(',')
+    + '|' + String(cap.maxUses)
+    + '|' + String(cap.expiresAt);
+  return (cap.id ? 'id:' + cap.id : 'anon') + '#' + body;
 }
 
 /** 已用次数 */
