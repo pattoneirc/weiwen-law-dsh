@@ -1,6 +1,6 @@
 {
   "name": "dsh-weiwen-law",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "唯稳律（Weiwen's Law）通用因果引擎（白箱呈现）—— DeepSeek Harness (Cordis) 插件实现",
   "type": "module",
   "main": "./src/index.js",
@@ -23,7 +23,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "build:docs": "node scripts/build-docs-engine.mjs",
-    "check:docs": "node scripts/build-docs-engine.mjs --check"
+    "check:docs": "node scripts/build-docs-engine.mjs --check",
+    "check:release": "node scripts/check-release.mjs"
   },
   "engines": {
     "node": ">=22"

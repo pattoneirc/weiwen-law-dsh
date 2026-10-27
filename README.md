@@ -288,15 +288,30 @@ export DEEPSEEK_API_KEY=sk-xxxx     # Linux/macOS
 本插件已声明 `dsh.bundle.patch` 清单（见 `package.json`），DSH 用户可直接通过官方插件命令安装：
 
 ```bash
-# 从 GitHub 安装（源码直装，推荐）
-dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
-
-# 从 npm 安装（npm 发布后可用）
-# dsh plugin --profile web add "dsh-weiwen-law"
+# 从 npm 安装 —— **对外唯一安装入口**，钉住版本号（不要用 latest）
+dsh plugin --profile web add "dsh-weiwen-law@0.2.4"
 
 # 重启生效
 dsh --profile web
 ```
+
+<details>
+<summary>⚠️ 从 GitHub 源码直装（<b>仅开发自用，不对外</b>）</summary>
+
+```bash
+dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
+```
+
+这条走的是仓库 `main` 的**当前态**，不是发版态：`main` 随时在动，且动了不会通知任何人。
+两条路装出来可能不是同一份代码，而**版本号长得一样** ⇒ 出了问题无法对账。
+
+仓库的职责是"源"，npm 的职责是"分发"，两者分开：
+- **对外发布一律走 npm**，一个版本号对应一个提交，记在 [`RELEASES.md`](RELEASES.md)；
+- 要核对"npm 上此刻那份对应哪个提交"，跑 `npm run check:release`（真下载包算指纹，不看自报）。
+
+判断自己装的是哪一份，**看 `buildId`（代码哈希），不看版本号** —— 版本号是人写的，能忘改。
+
+</details>
 
 装完后在 `设置 → 插件 → 插件列表` 可见 `weiwen-law` 状态为"已启用"；Agent 自动获得 12 个白箱自查工具 + 3 道硬性闸门（`tools/pre-execute` / `agent/pre-step` / `tools/post-execute`）+ 1 个只读审计钩子（`tools/result`）。
 

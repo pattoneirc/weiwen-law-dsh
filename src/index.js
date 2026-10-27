@@ -53,15 +53,30 @@ const LOG = new URL('./runtime.log', import.meta.url);
 //   故指纹只由 `src/core/*.mjs` 的内容派生，不含版本号、不含时间。
 //   `_engine_base_*` 是打包时排除的基线副本，本地存在会污染哈希 ⇒ 显式排除。
 // 语义：同一 buildId ⇒ 同一份判据代码；不同 ⇒ 读数不可互认（**不是"谁新谁旧"**，新旧要另看提交）。
+// 🔴 换行必须规范化再哈希（2026-10-27 实测踩到，真装探针发现）：
+//   原实现直接对**工作区字节**做哈希 ⇒ 同一份代码在不同安装路径下给出不同指纹：
+//     npm 包内（老文件被 autocrlf 检出成 CRLF）→ `8e8604efd2cf`
+//     git 存储 / Linux 检出（LF）              → `91fea30b57f8`
+//   而 buildId 的**唯一用途**是「我说的代码和你测的代码是不是同一份」。
+//   掺进与代码无关的平台换行习惯 ⇒ 该用途当场失效，且失效方式最坏：
+//   比对不上会被读成「你装的是旧包」，而不是「指纹口径不一致」⇒ 直接把人带偏。
+//   ⇒ 规范化后再哈希：同一份代码，不论哪条安装路、哪个平台，值唯一。
+export function computeBuildId(entries) {
+  const h = createHash('sha256');
+  for (const [name, content] of [...entries].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    h.update(name);
+    h.update(String(content).replace(/\r\n/g, '\n'));
+  }
+  return h.digest('hex').slice(0, 12);
+}
+
 const BUILD_ID = (() => {
   try {
     const dir = new URL('./core/', import.meta.url);
-    const h = createHash('sha256');
-    for (const f of readdirSync(dir).filter((n) => n.endsWith('.mjs') && !n.startsWith('_engine_base_')).sort()) {
-      h.update(f);
-      h.update(readFileSync(new URL(f, dir)));
-    }
-    return h.digest('hex').slice(0, 12);
+    const entries = readdirSync(dir)
+      .filter((n) => n.endsWith('.mjs') && !n.startsWith('_engine_base_'))
+      .map((n) => [n, readFileSync(new URL(n, dir)).toString('utf8')]);
+    return computeBuildId(entries);
   } catch { return 'unavailable'; }
 })();
 const LOADED_AT = new Date().toISOString();
