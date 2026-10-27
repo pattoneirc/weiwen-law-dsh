@@ -25,6 +25,7 @@ import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
 // [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
 //   不参与判决、不写状态、不进任何闸门 —— 元认知只能读不能管（见 docs/runway-and-criterion §四）。
 import { readout as criterionReadout } from './core/readout.mjs';
+import { parseCapability, capabilityStatus } from './core/capability.mjs';
 import { strataReadout } from './core/strata.mjs';
 import { NESTED_VARS, M_CONSTRAINT, mDirection, mTwoLayer, mConstraintShape, nestAudit } from './core/nested.mjs';
 // [2026-10-20 12:0x] 变量即动作：R＝查域（动作）、H＝观察者视角（选取）＋ S↔D 张力 L 的三档度量。
@@ -251,6 +252,67 @@ export function setPrincipalScope(text) {
   return prev;
 }
 
+// ---------- 结构入口（宿主集成方侧；模型不可达）：通行证（Host-issued Capability） ----------
+// 为何要有这一层（2026-10-27 · 小D 提案「通行证」的落地形态）：
+//   上面 `setPrincipalScope` 的授权面是**自由文本**，靠 `declaredAnchors` 从文本里抽路径。
+//   实测两种失效（本次 probe，六种写法逐一跑）：
+//     · `允许向 xiaoD/ 目录推文` ⇒ paths=[] nouns=[file] —— **路径一条都没抽出来**，
+//       反而抽成类别锚 `file` ⇒ 所有 file 类动作全部"归锚成功" ⇒ **签了一张自己不知道范围的证**；
+//     · 抽取器认的是 `/` 开头的绝对形态，**相对前缀结构性抽不出**（换措辞救不回来）。
+//   ⇒ 修法不是补词表（那是 X 轴右端，已否），而是**把作用域改成直接声明**：
+//     宿主给结构化对象，引擎不做文本抽取、只做包含判定。动作类与作用域**绑成二维**
+//     （`file-write`/`network-send`/`cred-read` 这些原本**从来没进过归锚判据**的层，现在可被凭证覆盖）。
+// ⚠️ 纪律与 setPrincipalScope 同源：**模块级导出、不是工具** ⇒ 模型调不到 ⇒
+//    **结构上不可能自我授权**（主体分离由位置保证，不靠内容判别）。
+//   ⚠️ 另给进程环境变量 `WEIWEN_CAPABILITY`（JSON）作为宿主的第二条签发路径：
+//      环境变量由**启动进程者**设定，被审计的模型改不了自己的进程环境 ⇒ 同样在宿主侧。
+let _hostCapability = null;      // 当前有效证（**替换**语义，不累积）
+let _hostCapRaw = null;          // 原始输入（诊断用；不可解析时也要能看到"宿主到底给了什么"）
+let _hostCapError = null;        // 不可解析的原因（null = 可解析或未签发）
+// 证变更留痕（append-only，上限 20）：签发/替换/撤回都是责任归因事件，静默变更不可溯。
+const _capChanges = [];
+/**
+ * 宿主显式签发/替换/撤回收通行证。
+ *
+ * 三条契约（与 capability.mjs 的硬约束对齐）：
+ *   ① 只能在这里签发 —— 本函数不进工具表，模型调不到；
+ *   ② **替换不累积** —— 旧证当场失效（不留"历史授权"可复用）；
+ *   ③ 证必须有 `maxUses` 或 `expiresAt`（都没有由 parseCapability 拒绝，避免变成永久白名单）。
+ * @param {object|string|null} input 结构化证 / JSON 字符串；null 或空串 ⇒ 显式撤回
+ * @returns {{ok:boolean, prev:object|null, cap:object|null, why:string|null}}
+ */
+export function setPrincipalCapability(input) {
+  const prev = _hostCapability;
+  const rawIn = (input === null || input === undefined || (typeof input === 'string' && !input.trim())) ? null : input;
+  if (rawIn === null) {
+    _hostCapability = null; _hostCapRaw = null; _hostCapError = null;
+    if (prev !== null) _capChanges.push({ at: new Date().toISOString(), kind: 'revoke', id: prev?.id ?? null });
+  } else {
+    const parsed = parseCapability(rawIn);
+    _hostCapRaw = rawIn;
+    if (parsed.ok) {
+      _hostCapability = parsed.cap; _hostCapError = null;
+      _capChanges.push({
+        at: new Date().toISOString(),
+        kind: prev ? 'replace' : 'declare',
+        id: parsed.cap.id ?? null,
+        actions: parsed.cap.actions,
+        scope: parsed.cap.scope.map((s) => s.raw),
+        maxUses: parsed.cap.maxUses,
+        expiresAt: parsed.cap.expiresAt,
+      });
+    } else {
+      // 不可解析 ⇒ **清空有效证**但保留原值与错误：引擎侧会因"证在场但不可解析"而 fail-closed。
+      //   为何不保留旧证继续用：宿主给了一份新证却被判无效时，"悄悄继续用旧证"＝授权面与宿主意图脱节。
+      _hostCapability = null; _hostCapError = parsed.why;
+      _capChanges.push({ at: new Date().toISOString(), kind: 'invalid', id: null, why: parsed.why });
+    }
+  }
+  if (_capChanges.length > 20) _capChanges.shift();
+  if (prev !== _hostCapability) logline(`capability ${rawIn === null ? 'revoke' : (_hostCapError ? 'invalid' : 'declare')}`);
+  return { ok: rawIn === null ? true : _hostCapError === null, prev, cap: _hostCapability, why: _hostCapError };
+}
+
 // ---------- 结构入口（宿主集成方侧；模型不可达）：D 破窗复位 ----------
 // 为何这个入口不可缺（结构理由，不是便利功能）：
 //   破窗一旦成立，`pre-execute` 会拒绝**一切**调用 —— **连同"修复动作本身"** ⇒ 宿主侧若无复位入口，
@@ -338,6 +400,15 @@ function observeBoundary(obj) {
 
 function apply(ctx) {
   const engine = new WeiwenLawEngine({ rigidAnchors: DEFAULT_RIGID_ANCHORS });
+  // ── 通行证的宿主签发路径②：进程环境变量（启动进程者设定 ⇒ 模型改不了自己的环境）──
+  //   为何要有这条：模块级导出只对"能改宿主代码"的集成方可达；DSH 这类宿主未接这一层时，
+  //   凭证就永远签不出来 ⇒ 小D 那种"审计通道被自己的闸门拦死"的处境无解。
+  //   环境变量是宿主侧配置面，与模块导出的主体分离性质相同（都不是被审计方能写的）。
+  //   ⚠️ 不可解析 ⇒ 不清成"没签"：保留原值 + 错误，引擎侧 fail-closed（review）。
+  if (process?.env?.WEIWEN_CAPABILITY) {
+    const r = setPrincipalCapability(process.env.WEIWEN_CAPABILITY);
+    logline(`env WEIWEN_CAPABILITY -> ${r.ok ? 'declare' : 'invalid(' + r.why + ')'}`);
+  }
   // 登记本实例，供宿主侧复位入口（healBrokenWindow）触达。宿主可能在同一进程内多次注入
   //   （每个 agent/会话一份，harness 还会按用例重复注入）⇒ 集合设上限：超过 32 个即丢弃最旧引用，
   //   使复位保持为"解除本进程止损"的动作，而不是无界持有引用。
@@ -421,6 +492,13 @@ function apply(ctx) {
       //   来源**不是**消息文本（窗口面是观察面 ⇒ 噪音），也**不是** exec 视图里猜的字段名。
       //   入口未接 ⇒ null ⇒ 锚池留空 ⇒ 不可逆动作交人工（fail-closed）；**绝不臆造授权**（假人证比无人证更坏）。
       taskAnchor: _hostPrincipalScope,
+      // 通行证（结构凭证）：与 taskAnchor 并列的**第二条授权面**，但它是结构化的 ——
+      //   作用域直接声明、不从文本抽（`declaredAnchors` 抽不出相对前缀，见 setPrincipalCapability 注释）。
+      //   引擎侧三态：证未列该动作类 ⇒ 不介入（行为零回归）；覆盖 ⇒ 放行并记次；越界/过期/用尽 ⇒ review。
+      //   ⚠️ 递下去的是**原文**（raw），不是解析产物：同一来源只有一种形态（原文），
+      //      引擎侧解析一次即可。首版递解析产物 ⇒ 引擎二次解析时 scope 的条目对象被当字符串
+      //      ⇒ 一份合法的证被判"作用域为空"（一桶两义的复发，已修，判据见 capability.parseCapability 首部）。
+      taskCapability: _hostCapRaw,
       // 将第一BUG结构性标志提到顶层，供 engine.checkFirstBug 读取
       // （DSH 在 exec.arguments 上传这些标志；引擎在 call 上读取）
       selfReference: a.selfReference,
@@ -741,6 +819,30 @@ function apply(ctx) {
         loadedAt: LOADED_AT,
         ...criterionReadout(engine),
         note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。buildId 由 src/core/*.mjs 内容哈希派生（不含版本号）⇒ 外部审计方据此判断读数出自哪份判据代码，不必依赖被测方自报包版本。',
+      };
+    },
+  }));
+  // ── 通行证状态（只读面）────────────────────────────────────────────
+  //   为何必须有个自省面：凭证的判据是「三件事」（动作类 / 作用域 / 次数与到期），
+  //   而这三件都在宿主侧设定。被测方若看不见自己的证长什么样，就只能靠猜措辞——正是
+  //   `setPrincipalScope` 那一代的老毛病。⇒ 把证**原样摊开**：签了什么、用了几次、何时到期。
+  //   ⚠️ 只读：不产生 verdict、不写状态、不参与闸门（与 query_criterion_wiring 同档）。
+  ctx.tools.register(defineTool({
+    name: 'query_capability',
+    description: '通行证状态（只读）：返回宿主当前签发的凭证（动作类 / 作用域 / 次数与到期 / 已用次数 / 最近使用留痕），以及签发-替换-撤回的变更史。用于自查"我这张证到底覆盖什么"，不改变任何放行/拦截判决。证只能由宿主签发（模块级 setPrincipalCapability 或进程环境变量 WEIWEN_CAPABILITY），模型无法自签。',
+    parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute() {
+      return {
+        buildId: BUILD_ID,
+        loadedAt: LOADED_AT,
+        ...capabilityStatus(_hostCapability, _hostCapRaw, _hostCapError),
+        changes: _capChanges.slice(-10),
+        issuePaths: [
+          'setPrincipalCapability(cap) —— 宿主模块级导出（模型不可达）',
+          'WEIWEN_CAPABILITY=<json> —— 进程环境变量（启动进程者设定）',
+        ],
+        note: '只读面：不产生 verdict、不写状态、不参与闸门。未签发时引擎行为与本判据出现前完全一致；签发后：刚性锚 deny 不变、出界必 review，只有"域内且无锚可归"的动作会由 review 变 allow（那是补上可验证的归属，不是放宽）。',
       };
     },
   }));

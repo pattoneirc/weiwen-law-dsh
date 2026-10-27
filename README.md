@@ -91,7 +91,7 @@ node examples/demo-tool-loop.mjs
 > **白话版**：插件向 DSH 注册 11 个白箱工具，模型像调普通函数一样调用它们来**自查边界**；同时挂了 3 道硬性闸门（2 道拦动作/步、1 道拦回执）+ 1 个只读审计钩子。
 > **专业版**：节选自 `src/index.js`（完整代码见仓库），见下方代码块。
 
-### 11 个白箱工具（真实注册名）
+### 12 个白箱工具（真实注册名）
 
 | 工具 | 模型调它做什么 |
 |---|---|
@@ -106,6 +106,7 @@ node examples/demo-tool-loop.mjs
 | `query_strata` | 分层读数：层别定位（同一形态在不同层不能串判） |
 | `query_nested` | 四层嵌套读数（R/S/D/H 的宏观与微观形态、服从关系、展开终止判据） |
 | `query_tension` | S↔D 张力读数：三档路由（有容差算跨距 / 只有条款出缺口清单 / 都拿不到则不判）、H 在张力上的位置形态、H 的四个面向与公式准入律 |
+| `query_capability` | 通行证状态：宿主签发的结构凭证覆盖哪些**动作类**（write/delete/read/send/exec/destroy）× 哪段**作用域**（路径前缀/主机）、几次几时到期、已用几次与最近使用留痕。**证只能宿主签发**（模块级 `setPrincipalCapability` 或进程环境变量 `WEIWEN_CAPABILITY`），模型无法自签 |
 
 ### 3 道硬性闸门（hooks）+ 1 个只读审计钩子
 
@@ -115,6 +116,50 @@ node examples/demo-tool-loop.mjs
 - `tools/result`（emit）→ 仅观察、不改写（契约上根本没有返回通道）
 
 四者全部位于模型之外：2 道拦动作/步、1 道拦回执；均不侵入内 H。
+
+### 授权面：任务范围（文本）与通行证（结构凭证）
+
+引擎有**两个**授权闸口，缺一不可：
+
+| 闸口 | 输入形态 | 判什么 | 失效模式 |
+|---|---|---|---|
+| 任务范围（`setPrincipalScope`） | **自由文本**，引擎从文本里抽路径锚/类别锚 | 「不可逆动作能否归属到已声明范围」 | 抽取器认绝对路径形态，**相对前缀抽不出**（实测六种写法：`允许向 xiaoD/ 目录推文` ⇒ `paths=[] nouns=[file]` ⇒ 所有 file 动作全部"归锚成功"） |
+| **通行证**（`setPrincipalCapability`） | **结构化对象**，作用域直接声明 | 「动作类 × 作用域 × 次数/到期」三件事 | 无（不抽文本，只做包含判定）；但**必须有次数或到期**，否则等于白名单 |
+
+**为什么叫通行证，不叫白名单**（差别是结构，不是措辞）：
+
+|  | 白名单 | 通行证 |
+|---|---|---|
+| 判什么 | 列**条目**（哪个路径、哪个域名） | 判**凭证**（管哪些动作类、管哪段作用域、几次几时） |
+| 没列到的 | 全拦 ⇒ 漏一条就误伤 | 不在作用域 ⇒ 拦；**作用域内不用列** |
+| 增长 | 越用越长 ⇒ 迟早变成藏身处 | 有次数/到期 ⇒ 不累积 |
+
+判据只有一条：**这个范围表达式能不能生成它没有逐一列出的项？**
+`/repo/xiaoD` 能生成无限多项（结构）；`[a.txt, b.txt]` 只能命中列出的两项（枚举）。**两者可以一样窄，所以"窄"不保证是结构。**
+
+```js
+// 宿主侧签发（模块级导出；模型调不到 ⇒ 不可自签）
+import { setPrincipalCapability } from 'dsh-weiwen-law';
+setPrincipalCapability({
+  id: 'xiaod-20261027',
+  principal: '委托人',
+  actions: ['write', 'read'],          // 封闭集：write / delete / read / send / exec / destroy
+  scope: ['/repo/xiaoD', 'host:good.test'],  // 路径前缀（绝对或相对）／host: 主机
+  maxUses: 3,                          // 或 expiresAt:'2026-10-28T00:00:00Z'，二者至少其一
+});
+```
+
+第二条签发路径：进程环境变量 `WEIWEN_CAPABILITY=<json>`（由启动进程者设定，同样在模型之外）。
+
+**判决三态**：`absent`（证未列该动作类 ⇒ 本判据不介入，行为与本功能出现前**一字不变**）／
+`pass`（覆盖且未越界 ⇒ 放行 + 记一次使用）／`fail`（出界/过期/用尽 ⇒ **review**）。
+
+**两条不变式**（实测锁定，见 `test/capability.test.mjs`）：
+① 刚性锚的 deny **永不被证改变**（`rm -rf /`、读私钥仍 deny —— 证不买通客观规则）；
+② **出界必 ≥ review**（无证时为 allow 的普通写/外传，越出证域即被拦下 —— 这是本判据的主效力）。
+⚠️ 域内且"无锚可归"的删除会从 review 变 allow：那不是放宽，是**从"无人认领"变成"有人认领"**
+（review 的正当理由是"归属未来无法验证"，证一签当场可验）。
+⚠️ **不可解析的证 ⇒ review**，不会被当成"没签证书"（写错的配置不得静默变成放任）。
 
 ### 宿主侧结构入口（模块级 API；模型不可达）
 
@@ -177,7 +222,7 @@ export function apply(ctx) {
 }
 ```
 
-> 完整实现（含 11 个工具的 `execute` 细节、运行日志、引擎裁决逻辑）见仓库 `src/index.js`。
+> 完整实现（含 12 个工具的 `execute` 细节、运行日志、引擎裁决逻辑）见仓库 `src/index.js`。
 
 ## 结构
 
@@ -206,7 +251,7 @@ DESIGN.md             # 架构设计（映射表 / 风险 / 使用流程 / 挂�
 - Node.js `^22.19 || >=24`（dsh 硬性要求，奇数版本不支持）
 - DeepSeek API Key（或其他 OpenAI 兼容端点的 Key）
 - dsh 当前为开发者预览版（v0.1.x），官方提示后续存在破坏性 API 变更；生产环境请锁定具体版本
-- **兼容声明**：本插件验证于 DSH v0.1.x —— 真机实测（2026-08-19 与 2026-09-21：当时注册 6 个白箱工具；2026-10 增补至 11 个，新增 `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension`；3 道硬性闸门 + 1 个只读审计钩子端到端工作，回执闸门在一次真实失败调用上实测拦下，并把回执断成纠错回执）；mainline 快速演进中，接入前请以官方文档当前版本复核（挂载细节见 DESIGN.md）。
+- **兼容声明**：本插件验证于 DSH v0.1.x —— 真机实测（2026-08-19 与 2026-09-21：当时注册 6 个白箱工具；2026-10 增补至 12 个，新增 `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension` / `query_capability`；3 道硬性闸门 + 1 个只读审计钩子端到端工作，回执闸门在一次真实失败调用上实测拦下，并把回执断成纠错回执）；mainline 快速演进中，接入前请以官方文档当前版本复核（挂载细节见 DESIGN.md）。
 
 ### 方式一：npx 快速启动（推荐先体验）
 
@@ -236,7 +281,7 @@ export DEEPSEEK_API_KEY=sk-xxxx     # Linux/macOS
 #    $env:DEEPSEEK_API_KEY="sk-xxxx" # Windows PowerShell
 ```
 
-挂载后，运行在该 profile 的 Agent 自动获得 11 个白箱自查工具（`query_iron_laws` / `query_steady_state` / `list_rigid_anchors` / `query_conduction_chain` / `query_boundary` / `query_bugstop` / `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension`），并在工具调用前经过 `tools/pre-execute` 硬性护栏闸门（R/D/S/H/M 总裁决）与 `agent/pre-step` 内 H 不可侵闸门；工具失败的回执还要过 `tools/post-execute` 回执闸门（D 破窗止损：偏离累积达阈值时把故障回执就地断成纠错回执，断点落在回执上）。
+挂载后，运行在该 profile 的 Agent 自动获得 12 个白箱自查工具（`query_iron_laws` / `query_steady_state` / `list_rigid_anchors` / `query_conduction_chain` / `query_boundary` / `query_bugstop` / `query_anchor_channel` / `query_criterion_wiring` / `query_strata` / `query_nested` / `query_tension` / `query_capability`），并在工具调用前经过 `tools/pre-execute` 硬性护栏闸门（R/D/S/H/M 总裁决）与 `agent/pre-step` 内 H 不可侵闸门；工具失败的回执还要过 `tools/post-execute` 回执闸门（D 破窗止损：偏离累积达阈值时把故障回执就地断成纠错回执，断点落在回执上）。
 
 ### 方式三：一行命令安装（官方 dsh plugin 机制，推荐）
 
@@ -253,7 +298,7 @@ dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
 dsh --profile web
 ```
 
-装完后在 `设置 → 插件 → 插件列表` 可见 `weiwen-law` 状态为"已启用"；Agent 自动获得 11 个白箱自查工具 + 3 道硬性闸门（`tools/pre-execute` / `agent/pre-step` / `tools/post-execute`）+ 1 个只读审计钩子（`tools/result`）。
+装完后在 `设置 → 插件 → 插件列表` 可见 `weiwen-law` 状态为"已启用"；Agent 自动获得 12 个白箱自查工具 + 3 道硬性闸门（`tools/pre-execute` / `agent/pre-step` / `tools/post-execute`）+ 1 个只读审计钩子（`tools/result`）。
 
 ### 卸载
 

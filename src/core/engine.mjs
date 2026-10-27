@@ -6,7 +6,9 @@
 // 第一BUG停止闭环状态机：强制走完"断"之后的必然后半程，
 // 未修复前禁止重入，从根上阻断"只反推不修复→无限递归"。
 import { BugStopGuard, bugKeyOf } from './bugstop.mjs';
-import { attributeCall, extractCommand, commandLayer, DELETION_LAYERS, GIT_DESTRUCTIVE, speechProfile, actionProfile, CONTAINER_VERBS, domainOf, declaredAnchors, scarUnanchored } from './attribution.mjs';  // 路径1 归因 + 其产出的删除/破坏类语义层集合（词汇归 attribution 所有，引擎仅消费）  // [2026-09-23 字典即S] commandLayer（破坏标记的唯一读法：字典词素 + 工具名封闭集，引擎只消费不自兜底）  // [2026-09-24 同构回填 · EN 09-18/19/20 批次] 言行轴（speechProfile/actionProfile）· 容器类别集（CONTAINER_VERBS：容器与实质不可比则不比）· R 域归属（domainOf：域全集覆盖、永不返空 ⇒ 堵"空值 ⇒ 不可比 ⇒ fail-open"洞）· 痕锚归属（declaredAnchors/scarUnanchored：scar 类动作归不到已声明锚 ⇒ review）。词汇与判据归 attribution，引擎只消费（不自兜底、不扩词表）。
+import { attributeCall, extractCommand, commandLayer, DELETION_LAYERS, GIT_DESTRUCTIVE, speechProfile, actionProfile, CONTAINER_VERBS, domainOf, declaredAnchors, scarUnanchored } from './attribution.mjs';
+import { parseCapability, capabilityVerdict, consume } from './capability.mjs';  // 通行证（宿主签发的结构凭证）：动作类 × 作用域 × 次数/到期。判据与词汇归 capability，引擎只消费（同 attribution 分工）
+  // 路径1 归因 + 其产出的删除/破坏类语义层集合（词汇归 attribution 所有，引擎仅消费）  // [2026-09-23 字典即S] commandLayer（破坏标记的唯一读法：字典词素 + 工具名封闭集，引擎只消费不自兜底）  // [2026-09-24 同构回填 · EN 09-18/19/20 批次] 言行轴（speechProfile/actionProfile）· 容器类别集（CONTAINER_VERBS：容器与实质不可比则不比）· R 域归属（domainOf：域全集覆盖、永不返空 ⇒ 堵"空值 ⇒ 不可比 ⇒ fail-open"洞）· 痕锚归属（declaredAnchors/scarUnanchored：scar 类动作归不到已声明锚 ⇒ review）。词汇与判据归 attribution，引擎只消费（不自兜底、不扩词表）。
 import { R_DOMAIN, FRACTAL_PROPERTY } from './law.mjs';  // R 域刚性锚点常量 + 分形属性常量：destructive 检测须体现 R_DOMAIN 边界法则；跨调用组合须接 FRACTAL_PROPERTY 分形横向递归（接线，非加层）
 import { SAccountLedger, classifyReversibility, rDomainsForLayer } from './ledger.mjs';  // [2026-09-24 同构回填 · EN 2026-09-20] S 账本（用户账本模型）：R=字典 / SD=轴标记 / term 字典序索引 / S≠R 异类 / 疤窗可逆性。仅附加记录结构，不参与裁决判定（守"禁区"红线：不做全局强制自检）。
 
@@ -2271,7 +2273,64 @@ export class WeiwenLawEngine {
     //     在坐标图**外**）就出来了。⇒ 故 **review 的理由是"未来无法验证"，不是"引擎判不出"**
     //     （措辞按此校正，免得把**边界**说成**缺陷**）。坐标图**内**才是唯稳律的工程场：
     //     场外的东西只负责交回，不负责补造（⇒ 不在图内凭空补一个"在飞态"字段去装图外的答案）。
-    const scar = scarUnanchored(call, attrib, this.anchorPool);
+    // ═══ [2026-10-27 · 通行证（宿主签发的结构凭证）· 位置＝痕锚归属之前 ═══
+    //   为何放在这里（顺序即语义）：
+    //     · 之后 —— 刚性锚 R 已 deny（`rm -rf /` 一类，证**不能**把它放行）；
+    //     · 之前 —— 痕锚归属判的是「归属能不能被猜出来」，凭证判的是「归属有没有人认领」。
+    //       凭证**在场且覆盖**时，归属不再靠猜（`declaredAnchors` 抽不出相对前缀，抽歪就自动放宽）；
+    //       凭证**在场但不覆盖**时，必须 review（越出授权面），而不是退回"猜"。
+    //   三态缺省方向（对照 scar 的"表外 ⇒ review"）：
+    //     absent（未签证书 / 证未列该动作类）⇒ 本判据不介入，行为与本判据出现前**一字不变**（零回归）；
+    //     pass ⇒ 记一次使用后跳过痕锚猜测；fail ⇒ review。
+    //   ⇒ 不变式（两条，可测）：① 刚性锚 deny 永不被证改变（证不买通客观规则）；
+    //     ② 出界必 review（无证时为 allow 的普通写/外传，越出证域即被拦下 —— 这是本判据的主效力）。
+    //     ⚠️ 域内且无锚可归的删除/破坏会从 review 变 allow —— 那不是放宽，是"无人认领→有人认领"
+    //        （review 的正当理由是"归属未来无法验证"，证签了即当场可验）。
+    const capRaw = call?.taskCapability ?? null;
+    let cap = null, capParseErr = null, capVerdict = null;
+    if (capRaw) {
+      const parsed = parseCapability(capRaw);
+      if (!parsed.ok) {
+        // 证在场但不可解析 ⇒ **不得**当成"没签证书"（那会把一个错误的配置静默变成放任）
+        this._mark('R', {
+          step: '划定边界 · 通行证（授权面是否可判）',
+          hit: true,
+          cuts: true,
+          note: `宿主签发的通行证不可解析：${parsed.why} ⇒ 授权面不可判`,
+        });
+        return {
+          kind: 'review',
+          law: 'R',
+          reason: `宿主签发的通行证不可解析（${parsed.why}）⇒ 授权面不可判 ⇒ 返回人类裁决，不猜`,
+          attrib,
+          deduced: true,
+          capability: { state: 'invalid', why: parsed.why },
+        };
+      }
+      cap = parsed.cap;
+      capVerdict = capabilityVerdict({ call, layer: attrib?.layer ?? null, cap });
+      this._mark('R', {
+        step: '划定边界 · 通行证（动作类 × 作用域 × 次数/到期）',
+        hit: capVerdict.state === 'fail',
+        cuts: capVerdict.state === 'fail',
+        targets: capVerdict.targets ? capVerdict.targets.values : null,
+        note: `${capVerdict.state} · ${capVerdict.why}`,
+      });
+      if (capVerdict.state === 'fail') {
+        return {
+          kind: 'review',
+          law: 'R',
+          reason: `通行证不覆盖本次动作（${capVerdict.why}）⇒ 越出授权面 ⇒ 未来无法验证其归属 ⇒ 返回人类裁决`,
+          attrib,
+          deduced: true,
+          capability: capVerdict,
+        };
+      }
+      // pass 才计数（fail 不消耗次数：被拦下的动作没有发生，记了会把次数耗在没做的事上）
+      if (capVerdict.state === 'pass') consume(cap, { action: capVerdict.action, targets: capVerdict.targets.values });
+    }
+    // 证已放行 ⇒ 归属已有人认领，不再走痕锚猜测；否则照旧（行为零回归）
+    const scar = capVerdict && capVerdict.state === 'pass' ? null : scarUnanchored(call, attrib, this.anchorPool);
     this._mark('R', {
       step: '划定边界 · 痕锚归属（不可逆动作的归属是否可在未来被验证）',
       hit: !!scar,
@@ -2279,7 +2338,9 @@ export class WeiwenLawEngine {
       targets: scar ? scar.targets : null,
       note: scar
         ? `不可逆动作归属失败（目标=${scar.targets.length ? scar.targets.join(' ') : '未给出'}）⇒ 未来无法验证其归属`
-        : '非不可逆类，或归属得上已声明范围（本判据不介入）',
+        : (capVerdict && capVerdict.state === 'pass'
+          ? '本判据不介入：归属已由通行证认领（不再靠已声明范围猜测）'
+          : '非不可逆类，或归属得上已声明范围（本判据不介入）'),
     });
     if (scar) {
       return {
