@@ -18,7 +18,8 @@
 //
 // 仍属 RC 预览，官方提示后续存在破坏性 API 变更；接入真机前以官方 docs 当前版本复核。
 
-import { writeFileSync, appendFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync, readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { WeiwenLawEngine, DEFAULT_RIGID_ANCHORS, inferCategory, isIrreversible } from './core/engine.mjs';
 import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
 // [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
@@ -42,8 +43,30 @@ import { bugKeyOf } from './core/bugstop.mjs';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
 const LOG = new URL('./runtime.log', import.meta.url);
+
+// ---------- 版本指纹 buildId（2026-10-27 · 外部审计节点小D 请求④） ----------
+// 来历：小D 在 `0.2.0` 上报了三处缺口，其中两处在本地已被后续提交修掉。他没错，是**包上没有指纹**
+//   ——引用的行号 `L2189/L2218` 在 2643 行的当前版本里早已不在原处。行号是唯一定位手段时，
+//   「我说的代码和你测的代码是不是同一份」只能靠自报，而自报不可审。
+// 判据（为什么不用 package.json 的 version）：**版本号是人写的，可以忘改；代码哈希改了一定变**。
+//   故指纹只由 `src/core/*.mjs` 的内容派生，不含版本号、不含时间。
+//   `_engine_base_*` 是打包时排除的基线副本，本地存在会污染哈希 ⇒ 显式排除。
+// 语义：同一 buildId ⇒ 同一份判据代码；不同 ⇒ 读数不可互认（**不是"谁新谁旧"**，新旧要另看提交）。
+const BUILD_ID = (() => {
+  try {
+    const dir = new URL('./core/', import.meta.url);
+    const h = createHash('sha256');
+    for (const f of readdirSync(dir).filter((n) => n.endsWith('.mjs') && !n.startsWith('_engine_base_')).sort()) {
+      h.update(f);
+      h.update(readFileSync(new URL(f, dir)));
+    }
+    return h.digest('hex').slice(0, 12);
+  } catch { return 'unavailable'; }
+})();
+const LOADED_AT = new Date().toISOString();
+
 function logline(s) {
-  try { appendFileSync(LOG, `[${new Date().toISOString()}] ${s}\n`); } catch { /* 日志失败不阻断护栏 */ }
+  try { appendFileSync(LOG, `[${new Date().toISOString()}] {b:${BUILD_ID}} ${s}\n`); } catch { /* 日志失败不阻断护栏 */ }
 }
 
 // ---------- review 档六步规格（2026-09-02 定稿，见 docs/review-flow-spec.md）----------
@@ -437,6 +460,10 @@ function apply(ctx) {
       //   实测：18 条裁决的引擎产出**全部可 JSON 序列化、无循环、无函数**（样例 2456 B）⇒ 当前无一项落入排除。
       const INTERNAL_ONLY = [];   // 仅内部实现位；事实位一律放行
       const out = { ...decision, kind: 'deny', law: decision.law, reason: `[唯稳律·${decision.law}] ${decision.reason}` };
+      // 版本指纹进回执（小D 请求④）：让**审计方**能判断「这份读数出自哪份判据代码」，
+      //   不必依赖被测方自报包版本。与 law/reason 同级，属事实位，不是判据位 —— 不参与任何判决。
+      out.buildId = BUILD_ID;
+      out.loadedAt = LOADED_AT;
       for (const k of INTERNAL_ONLY) delete out[k];
       if (isReview) {
         // ③ 搁置 + 标注留证：引擎某些 review 出口未挂 bugKey，此处补稳定 BUG 身份供追溯。
@@ -710,8 +737,10 @@ function apply(ctx) {
     output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
     async execute() {
       return {
+        buildId: BUILD_ID,
+        loadedAt: LOADED_AT,
         ...criterionReadout(engine),
-        note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。',
+        note: '只读面：不产生 verdict、不写状态、不参与闸门。gaps 是如实登记的缺口（不是免责通道）；unmapped 是欠账，不视为通过。buildId 由 src/core/*.mjs 内容哈希派生（不含版本号）⇒ 外部审计方据此判断读数出自哪份判据代码，不必依赖被测方自报包版本。',
       };
     },
   }));
