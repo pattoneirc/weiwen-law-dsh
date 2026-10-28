@@ -1051,7 +1051,7 @@ function apply(ctx) {
     name: 'submit_pledge',
     description: '提交/替换担保（自陈的界）：声明接下来只在【动作类 × 落点 × 次数/到期】内活动，此后越界即被拒并计入第一 Bug。担保只能收窄、不能放宽授权（有效面＝宿主通行证∩担保）。范围越窄越好；不提交则本判据不介入，行为与之前完全一致。',
     parameters: {
-      actions: { type: 'array', items: { type: 'string' }, description: '动作类，合法值 write/delete/read/send/exec/destroy' },
+      actions: { type: 'array', items: { type: 'string' }, description: '动作类，合法值 write/delete/read/send/exec/destroy。**按工具被归到哪一类填，不按任务语义填**：宿主只给了 shell / 命令执行工具时，用它写文件算 exec（动作发生在 exec 通道里）—— 填 write 会被判越界；有专门的 write_file 类工具时才填 write。' },
       paths: { type: 'array', items: { type: 'string' }, description: '允许的路径前缀（目录或文件）' },
       hosts: { type: 'array', items: { type: 'string' }, description: '允许对外连接的主机' },
       maxUses: { type: 'integer', description: '最多兑现次数（与 expiresAt 至少给一个，否则视为永久担保被拒）' },

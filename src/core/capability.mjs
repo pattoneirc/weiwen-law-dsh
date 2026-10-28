@@ -539,7 +539,11 @@ export function pledgeVerdict({ call, layer, pledge, now = Date.now() }) {
     return { state: 'expired', action, why: `担保已于 ${pledge.expiresAt} 到期 ⇒ 担保失效（不等于违背担保）` };
   }
   if (!pledge.actions.includes(action)) {
-    return { state: 'breach', action, why: `担保里没列动作类「${action}」⇒ 做了担保外的事` };
+    // 🔴 [2026-10-28 · 真 API 实测] 判词必须**可自救**，否则口径误解会被计成越界（第一 Bug）。
+    //   实测：宿主只给 shell 工具时，模型按任务语义报 `write`，而写文件实际走 exec 通道 ⇒ 判越界。
+    //   判据不动（越界就是越界），但**说清怎么补**：这一句让模型能一次纠正，而不是反复撞墙把计数撞到停机。
+    //   这与"回执要给出可执行出口"是同一条纪律：给了出口的拒绝会被执行，没给出口的拒绝只会被重试。
+    return { state: 'breach', action, why: `担保里没列动作类「${action}」⇒ 做了担保外的事（若这是通道口径问题——例如宿主只给 shell/命令工具、写文件实际走 exec——重新提交担保并补上「${action}」即可；本次动作仍被拒）` };
   }
   const targets = targetsFor(call, layer);
   if (!targets.values.length) {
