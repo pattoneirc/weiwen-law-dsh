@@ -25,6 +25,7 @@
 | 0.2.5 | 3c7f944 | 91fea30b57f8 | — | 0721e0544c27b63140beb066c472c99ed2492d33 | 2026-10-27 | 规范化口径**首个**版本；与 0.2.3 同指纹 —— core 判据代码没变，改的是「怎么算指纹」＋文档/记账。**同指纹＝同判据代码，不是没更新** |
 | 0.2.6 | 9dcd82b | 91fea30b57f8 | — | 07b31200075d25c4af237cb33ba031ef7b42d171 | 2026-10-27 | **纯文档版**：`ONBOARDING.md` 三态→四态（review① 待补料 / ② 交还）、`WALLS.md` 补第 ⑧ 号墙 ＋ 新增「它在账本里的位置」、README 入口改三份映射。**判据代码一行未动** ⇒ 与 0.2.3 / 0.2.5 同指纹。包内 `ONBOARDING.md` 9433B、`WALLS.md` 7833B，与工作区逐字一致 |
 | 0.2.7 | 98a0b93 | 870ab94e913f | dc581d1fbdfe | 58ceb041ff9a30bc90f227acf241f01e65fea3c8 | 2026-10-27 | **行为变更（不是文档版）**：治「量具自指」——修前 `query_conduction_chain` 读 `engine.conduction`（只存最近一次），而查询工具自己也要过闸 ⇒ 它读到的是**自己**。改 `conductionHistory`（32 步）+ `lastConductionExcluding()` + 适配层显式登记册；`lastConduction` 语义变为「最近一次非自查裁决」，并新增 `lastConductionSubject` / `selfAuditExcluded` / `selfAuditTools`。同批补第二个指纹 `bundleId`（src 全量含适配层），并回填本列。546/546。 |
+| 0.2.8 | 6792d99 | 870ab94e913f | dc581d1fbdfe | 4b423e5335d11efd162831b5ebe96d37bfdf1f9b | 2026-10-28 | **纯文档版**：修「**指针指向包外**」——上一版把两轴留在 `docs/41`，而 `docs/` 不在 `files` 里 ⇒ 从 npm 装的人读到「全图见 docs/41-…」却**在包内找不到任何文件**。改法不是把 docs 塞进包，是把母图最小形态（三行两轴表）**内联进 `ONBOARDING.md`**，并注明 `docs/` 不进包；同时补半句「这张表判该拦还是该审，不是返回值形状」（防读者照表去等一个不会出现的返回值）。包内 `ONBOARDING.md` 9433B → 10.4kB。**`src/` 一行未动** ⇒ 与 0.2.7 双指纹相同（同判据代码，不是没更新）。546/546。⚠️ 首发机制记一笔：registry 回 **HTTP 202（已接收、异步处理）**，日志明写「may take a few minutes」，约 1 分钟后 `latest` 才可见 —— **202 不是失败，别按 0.2.4 的 409 残留去处理** |
 
 ## 各版本对应的提交是怎么确证的（不是靠记性）
 
