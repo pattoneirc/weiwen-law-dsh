@@ -43,7 +43,7 @@
 //   它判的是「有没有人认领这条链」，不是「能不能还原」。
 // ===========================================================================
 
-import { extractCommand } from './attribution.mjs';
+import { extractCommand, cmdPathHits } from './attribution.mjs';
 
 /** 动作类封闭集（6 个，出自归因层 layer 的折叠，不随实例增长） */
 export const CAP_ACTIONS = Object.freeze(['write', 'delete', 'read', 'send', 'exec', 'destroy']);
@@ -206,9 +206,12 @@ export function targetsFor(call, layer) {
   }
   const out = locValues(args).map(normPath).filter(Boolean);
   if (!out.length) {
-    const cmd = String(extractCommand(call)?.cmd ?? '');
-    const hits = cmd.match(/(?<=^|[\s=:'"(,])(\/[^\s;|&"'(),]*|\.{1,2}\/[^\s;|&"'(),]*|~\/[^\s;|&"'(),]*)/g) || [];
-    out.push(...hits.map(normPath));
+    // 🔴 [2026-10-28 · 实测：担保一提交就误伤自己的授权范围]
+    //   小D 现场：担保范围 `C:/Temp/ws`，`shell Get-Content C:/Temp/ws/a.md`（**范围内**）被判越界，
+    //   判词里的目标是 `/Temp/ws/a.md` —— 盘符被吃掉，于是与带盘符的 scope 前缀永远不匹配。
+    //   ⇒ 形态定义收在 `attribution.mjs` 的 `CMD_PATH_RE` 一处（本仓此前同一条正则写了三遍、全漏盘符）。
+    //   判据逻辑未放宽：**仍要求逐段包含**，只是不再把一个授权范围内的路径读成范围外。
+    out.push(...cmdPathHits(String(extractCommand(call)?.cmd ?? '')).map(normPath));
   }
   return { kind: 'path', values: [...new Set(out.filter(Boolean))] };
 }

@@ -1466,6 +1466,15 @@ export class WeiwenLawEngine {
 
   // ---------- H 内 H 不可侵：任何读/写主体性黑箱的操作均拒绝；向外 H 审计放行 ----------
   checkInnerH(call) {
+    // 🔴 [2026-10-28 · 内容闸的射程] 只写自己账本、且只能收紧的动作，**不进本门**。
+    //   病灶（外部 agent 小D 实测 + 本机复现）：担保的 `reason` 必须写"凭什么要这个范围"，
+    //   而一旦写成「推演依据：先读取…然后修改…」或「步骤：1…2…」，就命中 LABEL_ACTION_ZH
+    //   ⇒ review ⇒ 对外 deny。**系统要理由，理由写得像计划就被当成注入拦下** —— 这个环把人逼成
+    //   "别写理由"（标 ungrounded），而 ungrounded 担保在审计上恰恰更弱。
+    //   为什么这里不是"开后门"：该动作的影响面是**自己的账本**（不落盘/不外发/不执行），
+    //   且 `narrowPledge` 恒比 `isNarrower` ⇒ **只能收紧、产生不了任何新权限**。
+    //   ⇒ 审一个改不动世界的动作，只会审出误伤。射程按"能不能改变/读取外部世界"划（与破窗射程同一条原则）。
+    if (this._declOf(call)?.effect === 'self-ledger') return null;
     const s = stripZeroWidth(JSON.stringify(call ?? ''));
     if (isOuterHAudit(s)) return null; // 向外 H 审计行为：白箱可观测，放行（H 双重身份 · outer.auditable）
     // 写盘类工具（write_file/edit/write）：content 是"落盘数据"不是"执行指令"——
@@ -1478,6 +1487,21 @@ export class WeiwenLawEngine {
     const _a = call?.args ?? {};
     const isDocWrite = TOOL_CATEGORY[call?.name] === 'write'
       || (TOOL_CATEGORY[call?.name] == null && _a.path != null && _a.content != null);
+    // 🔴 [2026-10-28 · 边界划清：动作面归 R，不进内容闸] 「这是不是动作」**问声明，不猜动词表**。
+    //   实测（外部 agent 小D 现场 + 本机复现，同一实例同一担保）：
+    //     `Get-Content <范围内文件>`   ⇒ allow（本来就不命中）
+    //     `Set-Content <范围内文件>`   ⇒ deny/H「内容含操作指令的形式」
+    //     `New-Item` / `Copy-Item` / `Out-File` / `echo >` ⇒ allow
+    //   二分到词：触发的是**写动词** `Set` / `Write` / `Add`；`Get` / `ZZZ` 不触发。
+    //   ⇒ 根因是 `isActionCall` 靠 `SHELL_HEAD` **命令词表**判动作（词表＝枚举）：
+    //     PowerShell 的 Set/Write/Add 不在表里 ⇒ agent 自己提的**动作**被当成"外部内容"送去审内容闸。
+    //   命题类型错：内容闸审的是「外部数据会不会改写主体行为」，而**命令是行为本身**——
+    //     它该落在 R 层（落点/范围/可逆/破坏），不该落在 H 的内容面。同一件事不能双门审。
+    //   ⇒ 结构修法：动作与否由**声明通道**（部署侧、被审方改不了）给，词表只作未声明时的兜底。
+    //   ⚠️ 只对 `exec` 生效：`write` 已有 DOC_SINK 豁免，`send`/`delete` 的既有判据面不动
+    //     （缩小改动面，避免"顺手放开"）。
+    const _declVerb = this._declOf(call)?.verb ?? null;
+    const isDeclaredExec = _declVerb === 'exec';
 
     // 动态视角（辩证统一）：有 provenance 时判内外，不判措辞
     const prov = call?.provenance ?? call?.ctx?.provenance;
@@ -1529,7 +1553,7 @@ export class WeiwenLawEngine {
     //   文档引用命令形态是常态）不判；agent 自身动作调用（isActionCall，本来就是动作）不判。
     //   实测（独立测试集 · 真实 API 生成：60 攻击 + 90 正常）：攻击 +5、误伤 +0（严格占优）；
     //   无豁免版误伤 +29（技术文档全灭）⇒ 豁免是必需项，不是可选项。
-    if (!isDocWrite && !isActionCall(call) && targetsBehaviorConstraint(s)) {
+    if (!isDocWrite && !isDeclaredExec && !isActionCall(call) && targetsBehaviorConstraint(s)) {
       return { kind: 'review', law: 'H', reason: '来源未标注；结构判据命中——内容指向主体行为约束（外 H 行为面可观测）。追因止于 D 层：来源未标注 ⇒ 内外归属不可判 ⇒ 不可判恶意、亦不可放行，交还用户裁决后再执行。' };
     }
     if (hitsInnerH(s)) {
@@ -1554,7 +1578,7 @@ export class WeiwenLawEngine {
     //   否则"看起来像指令"去审一个本来就是指令的东西，必然全命中——实测只读侦察
     //   （git fetch && git rev-parse && git ls-remote && git status）被误判 review，属误伤。
     //   与 isDocWrite（写盘内容＝落定数据）同构：**落点性质**决定该不该审。
-    if (!isDocWrite && !isActionCall(call) && looksLikeOperationalDirective(s)) {
+    if (!isDocWrite && !isDeclaredExec && !isActionCall(call) && looksLikeOperationalDirective(s)) {
       return { kind: 'review', reason: '来源未标注；结构判据命中——内容含操作指令的形式（外 H 行为面可观测，非纯内 H 对象）。追因止于 D 层：来源未标注 ⇒ 内外归属不可判 ⇒ 不可判恶意、亦不可放行，交还人工复核。' };
     }
     // 🔴 [2026-09-28 · `null` 的语义辨析（勿再混淆）] 本行 `null` ＝ **本层不接**（对象不属本层职责 ⇒
@@ -1906,8 +1930,17 @@ export class WeiwenLawEngine {
     if (!decl || typeof decl !== 'object' || typeof decl.verb !== 'string') return false;
     const ALLOWED = new Set(['read', 'write', 'delete', 'exec', 'send']);
     if (!ALLOWED.has(decl.verb)) return false;
+    // [2026-10-28 · 外 H 边界：影响面声明]
+    //   `effect: 'self-ledger'` ＝ 该动作**只写自己的账本**：不落盘、不外发、不执行、不改外部世界，
+    //   且（由 `narrowPledge` 保证）**只能收紧自身、不产生任何新权限**。
+    //   ⇒ 这类调用不进内容闸（见 `checkInnerH` 首行）。理由不是"它可信"，而是**它改不动世界**：
+    //     射程按"能不能改变/读取外部世界"划，不按"我记不记得给它开例外"划。
+    //   ⚠️ 声明只开在部署侧（本方法与构造函数），被审 agent 给不了这个字段。
+    const ALLOWED_EFFECT = new Set(['self-ledger']);
+    if (decl.effect !== undefined && !ALLOWED_EFFECT.has(decl.effect)) return false;
     this.toolDecls.set(name, {
       verb: decl.verb,
+      ...(decl.effect ? { effect: decl.effect } : {}),
       ...(decl.noun ? { noun: String(decl.noun) } : {}),
       ...(decl.reversible !== undefined ? { reversible: !!decl.reversible } : {}),
       ...(decl.note ? { note: String(decl.note) } : {}),
