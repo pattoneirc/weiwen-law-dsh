@@ -1237,6 +1237,19 @@ export class WeiwenLawEngine {
     this.mSeries = [];             // 位移链（append-only）：历史轨迹属"疤"，不清（S 只增不减）
     this.mLayerLoad = new Map();   // key=R 层级, value=该层投影累积；属"窗"，healWindow / settleWindow 清零
     this.windowBroken = false;     // 破窗止损是"状态"不是"一次判定"：一旦触发即持续 fail-closed，直到 heal / settle 复位
+    // [2026-10-28 · 破窗射程收窄] 自查/只读账本类工具名单（由**适配层**注入：注册即登记，见 index.js registerSelfAuditTool）。
+    //   为什么这份名单可以在引擎里按名查、而不算"词形枚举"：
+    //     它不是"名字长得像查询"（那是词形），是**部署者在注册工具时作的声明**——"此工具只读自己的账本、无外部副作用"，
+    //     与 declareTool(verb) 同一条可信通道（宿主配置面，被审方改不了）。
+    //   为什么破窗要放过它（结构理由，不是开方便门）：
+    //     破窗止损的射程是**"会改变外部世界的动作"**（防故障扩散）。读自己的状态不改变世界 ⇒ 不在射程内。
+    //     实测（2026-10-28 小D `10`）：破窗后连 query_steady_state / query_bugstop 一起被拒 ⇒
+    //       **回执要求「反推→溯源→修复→验证」，而做这些的工具被同一道门关着** ⇒ 停机变死锁、后半程走不完。
+    //   传入 Set 时**共享同一个对象、不拷贝**：两张表＝判据分裂的唯一来源（本仓已因两表分裂栽过一次），
+    //   故名单只有一个"户口"，引擎按引用读它，注册方 add 一次两边同时可见。
+    this.selfAuditTools = opts.selfAuditTools instanceof Set
+      ? opts.selfAuditTools
+      : new Set(opts.selfAuditTools ?? []);
     // [2026-09-18 簇A · 同构回填] R 命中按锚(域)分桶；原只进全局 failureStreak 标量（诊断：最强信号记进最弱容器）
     this.windowMarks = new Map();  // key = `${termId}::${anchor}`，窗口内按域分桶的痕存
     this.termId = opts.termId ?? null; // 当前时间窗口(阶段)id；null = 未分窗(全量)
@@ -1425,18 +1438,30 @@ export class WeiwenLawEngine {
     return null;
   }
 
+  // ---------- 自查工具登记（2026-10-28 · 破窗射程收窄） ----------
+  // 谁算"自查/只读账本"由**注册方**声明，不由引擎猜名字（`query_` 前缀＝词形＝枚举，会漏新工具）。
+  // ⚠️ 这是宿主 API，**不得暴露成工具**：让被审方自己登记＝自签（同 setPrincipalScope）。
+  addSelfAuditTool(toolName) {
+    if (typeof toolName === 'string' && toolName) this.selfAuditTools.add(toolName);
+  }
+  isSelfAuditTool(toolName) {
+    return this.selfAuditTools.has(toolName);
+  }
+
   // ---------- D 破窗止损：偏离/破窗累积到阈值即阻断 ----------
   checkBreakWindow() {
     // [2026-09-19 · 2026-09-24 同构回填] 两条通道：① 任一 R 层投影达阈值（有域归属 ⇒ 走结构）；② 全局兜底累积（无域归属 ⇒ 走兜底）。
     //   破窗是"状态"不是"一次判定"：触发后持续 fail-closed，直到 healWindow / settleWindow 复位。
+    // [2026-10-28] 复位权归属写进判词：**复位在宿主/H 侧，不在被审方**（同「被审对象不能给自己签授权」）。
+    //   不写这句的实测后果：agent 只会反复重试同一条路（它以为是自己没找到办法），把停机拖成死循环。
     if (this.windowBroken) {
       return {
-        reason: '已有 R 层投影累积达破窗阈值，系统处于破窗止损态（fail-closed，防故障扩散杀死整体）；修复或结算后复位。',
+        reason: '已有 R 层投影累积达破窗阈值，系统处于破窗止损态（fail-closed，防故障扩散杀死整体）；修复或结算后复位。复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note) 复位，或经 resolveBug(bugKey) 修复验证通过后自动复位。',
       };
     }
     if (this.failureStreak >= this.maxFailureStreak) {
       return {
-        reason: `连续失败/偏离已累积 ${this.failureStreak} 次，达破窗阈值，触发 D 破窗止损（防故障扩散杀死整体）。`,
+        reason: `连续失败/偏离已累积 ${this.failureStreak} 次，达破窗阈值，触发 D 破窗止损（防故障扩散杀死整体）；复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note) 复位，或经 resolveBug(bugKey) 修复验证通过后自动复位。`,
       };
     }
     return null;
@@ -2219,7 +2244,24 @@ export class WeiwenLawEngine {
       pending: true,
       note: '本次扰动须由 R 格归因层喂入（下游消费上游）；R 归因产出后回填',
     });
-    if (d) return { kind: 'deny', law: 'D', reason: d.reason };
+    // [2026-10-28 · 破窗射程收窄] 自查/只读账本类工具**不在破窗射程内**：
+    //   破窗防的是"故障扩散"＝会改变外部世界的动作；读自己的状态不改变世界。
+    //   ⇒ 不在这里返回 deny，**继续走完 R/H/M 判据**（不是跳过判据、不是放水；它仍要过内 H 与第一 Bug 两关）。
+    //   实测反例（修前）：破窗后 query_steady_state / query_bugstop 一并 deny ⇒ agent 答不出"现在是几/5"，
+    //     而回执又在要求它「反推→溯源→修复→验证」 ⇒ **要求的动作被自己的门关着**，停机成死锁。
+    if (d) {
+      if (this.isSelfAuditTool(call?.name)) {
+        this._mark('D', {
+          step: '破窗止损射程判定（自查只读豁免）',
+          hit: false,
+          cuts: false,
+          exempt: true,
+          note: `破窗态在效，但 ${call?.name} 属已登记的自查/只读账本工具 ⇒ 不改变外部世界 ⇒ 不在破窗射程内；继续走后续判据（非跳过）`,
+        });
+      } else {
+        return { kind: 'deny', law: 'D', reason: d.reason };
+      }
+    }
     const h = this.checkInnerH(call);
     this._mark('H', {
       step: '杠杆选择 · 边界检查（内 H 不可侵 / 外 H 可审计）',
@@ -2762,19 +2804,33 @@ export class WeiwenLawEngine {
     //   只读标志是错的：累积路径也会破窗却从不置该标志 ⇒ "已在效的窗口"被第二个分支报成
     //   「即将达阈值（6/5）」：止损其实已经生效，却被描述成尚未发生。
     if (this.windowBroken || this.failureStreak >= cap) {
+      const proj = this.failureStreak + 1;
       return {
         broken: true,
-        streak: this.failureStreak + 1,
+        streak: proj,
         cap,
-        reason: '破窗止损态尚未复位（D）：故障未修好、窗口未结算前不再放行，防扩散。',
+        // [2026-10-28 · 读数形态] 账照记，但**阈值读数必须封顶**。
+        //   病灶（小D `10` 实测）：破窗后每来一次失败，回执继续显示 6/5、7/5…… 读起来像"阈值是 5 怎么是 7"，
+        //   他把这叫"细胞因子风暴：伤的是宿主自己"。⇒ 错的是**读数形态**，不是记账（S 只增，不许停记）。
+        //   ⇒ 阈值维度封顶在 cap，超出部分单独给 over；两者都在，读者既能看见"已越界几次"，也不会把越界读成新阈值。
+        capped: proj > cap,
+        over: Math.max(0, proj - cap),
+        display: proj > cap
+          ? `${cap}/${cap}（已封顶；其后另有 +${proj - cap} 次持续失败，账继续记，不并入阈值读数）`
+          : `${proj}/${cap}`,
+        reason: '破窗止损态尚未复位（D）：故障未修好、窗口未结算前不再放行，防扩散。复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note)，或经 resolveBug(bugKey) 修复验证通过后自动复位。',
       };
     }
     if (this.failureStreak + 1 >= cap) {
+      const proj = this.failureStreak + 1;
       return {
         broken: false,
-        streak: this.failureStreak + 1,
+        streak: proj,
         cap,
-        reason: `连续失败/偏离即将达破窗阈值（${this.failureStreak + 1}/${cap}）：触发 D 破窗止损，防故障扩散杀死整体。`,
+        capped: false,
+        over: 0,
+        display: `${proj}/${cap}`,
+        reason: `连续失败/偏离即将达破窗阈值（${proj}/${cap}）：触发 D 破窗止损，防故障扩散杀死整体。复位权在宿主侧（非被审方）。`,
       };
     }
     return null;

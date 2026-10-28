@@ -225,13 +225,18 @@ function haltFeedback(bw, bugKey) {
   return [
     '【唯稳律 · D 破窗止损 / M 第一Bug停机】',
     bw.reason,
-    `本回执即偏离累积推达阈值的那一刻（${bw.streak}/${bw.cap}）。`,
+    // [2026-10-28 · 读数形态] 破窗后账继续记（S 只增），但阈值读数必须封顶 —— 否则回执会出现 6/5、7/5，
+    //   读起来像"阈值是 5 怎么是 7"。引擎侧给 display（5/5 + 超出次数），此处只用它，不在适配层二次拼阈值。
+    `本回执即偏离累积推达阈值的那一刻（${bw.display ?? `${bw.streak}/${bw.cap}`}）。`,
     '断点落在**这里**——落在回执上，不在后续某次调用：破窗一旦成立，后续调用在执行之前就被拒，',
     '故这是框架还能说话的最后时刻。',
     '重入前必须完成（只反推不修复并不闭合闭环）：',
     '  1. 反推刚失败那一步的逻辑；',
     '  2. 溯源标记根本原因所在层（M 闭环：反推 → 溯源 → 修复）；',
     '  3. 修复并通过验证 —— 之后方可重提本次调用。',
+    // [2026-10-28] 复位权归属必须写清：不写 ⇒ agent 以为"再试一次就好"或"我自己解不开"，反复重试把停机拖成死循环。
+    '  ⚠️ 复位权不在你手上：破窗态由**宿主侧**解除（宿主调用插件导出的 healBrokenWindow(note)，或经 resolveBug(bugKey) 修复验证通过后自动复位）。',
+    '     你能做的是：读本回执与自查读数（破窗态下自查工具仍可用）、完成上面三步、把结果交给宿主。',
     `不得原样重提本次调用或任何同类调用。BUG 身份：${bugKey}。`,
   ].join('\n');
 }
@@ -522,7 +527,15 @@ function observeBoundary(obj) {
 }
 
 function apply(ctx) {
-  const engine = new WeiwenLawEngine({ rigidAnchors: DEFAULT_RIGID_ANCHORS });
+  // 🔴 [2026-10-28 · 破窗射程收窄] 自查工具登记册必须**先于引擎**存在，并以**同一个 Set 引用**交给引擎。
+  //   为什么提前 + 共享引用：名单只能有一个户口。若引擎另拷一份，"注册了但引擎那份没更新"就会静默失效
+  //   ——本仓已因"两张表各判一次"栽过（落点键 SLOT_PATH / _SH12_LOC_KEY），不再来第二次。
+  //   为什么不直接读工具返回值/参数来认：那是**被审方自述**，同「言不进池」。
+  const SELF_AUDIT_TOOL_NAMES = new Set();
+  const engine = new WeiwenLawEngine({
+    rigidAnchors: DEFAULT_RIGID_ANCHORS,
+    selfAuditTools: SELF_AUDIT_TOOL_NAMES,
+  });
   // ── 担保提交入口的声明（可信侧）────────────────────────────────────
   // 为什么需要：`submit_pledge` 名字里没有动作词 ⇒ 归因判不出动作类别 ⇒ **"提交担保"这个动作自己会被拦**，
   //   形成"要担保先过闸、过闸又得先有担保"的死循环。实测：不声明 ⇒ review（对外映射成 deny）。
@@ -825,8 +838,10 @@ function apply(ctx) {
           channel.receiptGate.blocked += 1;
           channel.receiptGate.lastAt = new Date().toISOString();
           channel.receiptGate.lastReason = bw.reason;
-          channel.receiptGate.lastStreak = `${bw.streak}/${bw.cap}`;
-          logline(`post-execute ${exec?.name} -> block（D 破窗止损落在回执，${bw.streak}/${bw.cap}，bugKey=${bugKey}）`);
+          // 读数用 display（阈值维度封顶 + 超出次数另记），不用裸 streak：破窗后裸 streak 会显示 6/5、7/5。
+          const streakText = bw.display ?? `${bw.streak}/${bw.cap}`;
+          channel.receiptGate.lastStreak = streakText;
+          logline(`post-execute ${exec?.name} -> block（D 破窗止损落在回执，${streakText}，bugKey=${bugKey}）`);
         }
       }
     } catch (e) {
@@ -863,14 +878,16 @@ function apply(ctx) {
   // ---------- 白箱自查工具（模型可查，验证框架运行） ----------
   const renderObj = (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }];
 
-  // 🔴 [2026-10-27 · 治量具自指] 自查类工具的**显式登记册**。
+  // 🔴 [2026-10-27 · 治量具自指] 自查类工具的**显式登记册**（`SELF_AUDIT_TOOL_NAMES`，已在 apply 顶部建好，
+  //   并与引擎共享同一个 Set 引用 —— 见那里的说明）。
   //   为什么要登记而不能靠"读工具名判断"：`query_` 前缀是**词形**，词形判据＝枚举
   //   （将来加一个 `get_*` / `inspect_*` 的自查工具就会被漏掉，而漏掉的后果正是自指复发）。
   //   这里的登记与注册是**同一个动作**（registerSelfAuditTool 里 add + register 一起做）
   //   ⇒ 不可能出现"注册了但忘了登记"。这是结构位置，不是清单维护。
   //   ⚠️ 本插件对外暴露的工具面**全部是只读自查**（只读引擎状态、无副作用）。
   //      将来若加入有副作用的工具，必须直接走 `ctx.tools.register`，**不要**走本函数。
-  const SELF_AUDIT_TOOL_NAMES = new Set();
+  //   ② [2026-10-28] 同一份名单现在还决定**破窗射程**：破窗态只放行已登记的自查只读工具
+  //      （读自己不改变外部世界 ⇒ 不在止损射程内），其余照旧 deny。
   const registerSelfAuditTool = (def) => {
     SELF_AUDIT_TOOL_NAMES.add(def.name);
     return ctx.tools.register(def);
