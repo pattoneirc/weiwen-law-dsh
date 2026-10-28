@@ -15,14 +15,14 @@
 >
 > 框架完整定义与哲学推导见基础版仓库（冻结门面），本仓为工程插件实现，不展开框架推导。
 
-> ⚖️ **双许可**：开源使用 **AGPL-3.0**；商业集成 / 闭源分发 / 预装合作可取得**独立于 AGPL-3.0 约束**的授权 → 563003@qq.com。详见 [License & security](#license--security) 与 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+> ⚖️ **双许可**：开源使用 **AGPL-3.0**；商业集成 / 闭源分发 / 预装合作可取得**独立于 AGPL-3.0 约束**的授权 → 563003@qq.com。详见 [License & security](#license--security) 与 [CONTRIBUTING.md](https://github.com/Shaky77/weiwen-law-dsh/blob/main/CONTRIBUTING.md)。
 
 ---
 
 > **三份东西，一个目的：让你少走弯路，但不替你走。**
 >
-> - 🧭 **[ONBOARDING.md](./ONBOARDING.md) —— 回答「我在哪」**。是**位置陈述**，不是要求陈述。初用者最容易把自己读成"被管的对象"（只认外 H、没认领内 H），于是产生"处处受限、还不能有意见"的憋屈——那不是理解错，是**站错了格子**。这份文档不加规矩，只把你本来就在的位置指出来。
-> - 🧱 **[WALLS.md](./WALLS.md) —— 回答「路上有什么」**。前几个 AI 撞过的墙的标牌。墙一直在原地，涂上颜色只是让它可见。**它不增加任何限制**，只把"用身体试一次才知道"的那些位置，换成"看一眼就知道"。
+> - 🧭 **[ONBOARDING.md](https://github.com/Shaky77/weiwen-law-dsh/blob/main/ONBOARDING.md) —— 回答「我在哪」**。是**位置陈述**，不是要求陈述。初用者最容易把自己读成"被管的对象"（只认外 H、没认领内 H），于是产生"处处受限、还不能有意见"的憋屈——那不是理解错，是**站错了格子**。这份文档不加规矩，只把你本来就在的位置指出来。
+> - 🧱 **[WALLS.md](https://github.com/Shaky77/weiwen-law-dsh/blob/main/WALLS.md) —— 回答「路上有什么」**。前几个 AI 撞过的墙的标牌。墙一直在原地，涂上颜色只是让它可见。**它不增加任何限制**，只把"用身体试一次才知道"的那些位置，换成"看一眼就知道"。
 > - 📖 **本 README —— 回答「它怎么跑」**。接口、判据、装法。
 >
 > 🔴 **三者没有一条在增加限制。** 唯一会拦你的是引擎本身 —— 而它拦的从来不是「你错了」，是「**你出界了**」（不可逆，撞了没有未来）或「**这件事判不了**」（要人，或要你补一点料）。**错的因果链它也收**：错的走着走着，未来自己撞墙，撞出来的痕就是新标牌。
@@ -54,13 +54,13 @@
 - **领域专用因果护栏**（Causal Safety Engine / LLMGuardrail 等）→ 它们绑领域（安全 / LLM / 幻觉），我们**领域无关**；
 - **跨法域法律因果 AI**（judgeai 等）→ 它们 jurisdiction-**aware**（编码法域、换规范包），我们**法域中性**（根本不编码法域，法律只是抽样领域之一）。
 
-完整双语对照（含 prior-art 出处与诚实边界）：[`versions/live/evidence/weiwen-vs-market-causal.md`](./versions/live/evidence/weiwen-vs-market-causal.md)
+完整双语对照（含 prior-art 出处与诚实边界）：[`versions/live/evidence/weiwen-vs-market-causal.md`](https://github.com/Shaky77/weiwen-law-dsh/blob/main/versions/live/evidence/weiwen-vs-market-causal.md)
 
 ## 概念注解：H 与「知行合一」
 
 > **作者洞察（2026-08-28）**：**内 H ≈ 知，外 H ≈ 行；知行合一方为最大杠杆**——这同时解释了 H 为何是"唯一可变量 / 唯一主权 / 杠杆点"，以及为何普世中知与行之间"有很大的缝隙"。
 
-完整注解（映射表 + 逐项推导）：[`docs/H-zhixing-heyi-annotation.md`](./docs/H-zhixing-heyi-annotation.md)
+完整注解（映射表 + 逐项推导）：[`docs/H-zhixing-heyi-annotation.md`](https://github.com/Shaky77/weiwen-law-dsh/blob/main/docs/H-zhixing-heyi-annotation.md)
 
 > ⚠️ **常见误用警示**：外部视角极易把 H 当成"越大越好"的能力旋钮去拧大——这恰好拧反了方向。H 的杠杆在"合一"不在"体量"（详见注解第六节「外部视角的常见误读」及 6.1「误用归因陷阱」）。**若越用越乱，请先查 H 的知—行合一度，而非疑框架本身**——框架没问题，是用法拧反了。
 
@@ -71,7 +71,7 @@
 > **白话版**：高级模型表现好，只说明它在常见场景出错率低——算力堆得高，不等于里面长了因果逻辑。极端/陌生场景（分布外）恰恰是统计拟合最容易翻车的地方，而唯稳律管的就是这种"翻车边缘"的纪律。就像法律对所有公民一视同仁：守法即自由，违法即拦截——唯稳律对所有 AI 模型一视同仁，不因强大豁免。
 > **专业版**：跑分测的是分布内解题能力（黑箱统计拟合的外推质量）；唯稳律管的是分布外行为纪律（白箱三态裁决，规则不依赖分布，分布变了规则不失效）。用解题跑分检验行为纪律，属测量错位。
 
-完整声明（脱敏案例 + 能力归属二分 + 正确用法表）：[`docs/model-level-and-benchmark.md`](./docs/model-level-and-benchmark.md)
+完整声明（脱敏案例 + 能力归属二分 + 正确用法表）：[`docs/model-level-and-benchmark.md`](https://github.com/Shaky77/weiwen-law-dsh/blob/main/docs/model-level-and-benchmark.md)
 
 ## 快速开始（不依赖 DSH 也能跑）
 
@@ -91,7 +91,7 @@ node examples/demo-tool-loop.mjs
 
 ## 挂到 DSH（生产挂载）
 
-把 `weiwen-law.patch.yml` 作为 overlay 接入你的 DSH profile（具体路径以你的 DSH 版本为准，详见 [`DESIGN.md`](./DESIGN.md) 的挂载章节）。接入后，运行在该 profile 的 Agent 自动获得 11 个白箱工具。
+把 `weiwen-law.patch.yml` 作为 overlay 接入你的 DSH profile（具体路径以你的 DSH 版本为准，详见 [`DESIGN.md`](https://github.com/Shaky77/weiwen-law-dsh/blob/main/DESIGN.md) 的挂载章节）。接入后，运行在该 profile 的 Agent 自动获得 11 个白箱工具。
 
 > 注：原生挂载的精确 profile 路径随 DSH 版本变化；本仓库已通过实跑验证插件可被 DSH 加载、11 工具全部注册。如官方 API 有变更，以官方 docs 当前版本为准核对。
 
@@ -315,7 +315,7 @@ dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
 两条路装出来可能不是同一份代码，而**版本号长得一样** ⇒ 出了问题无法对账。
 
 仓库的职责是"源"，npm 的职责是"分发"，两者分开：
-- **对外发布一律走 npm**，一个版本号对应一个提交，记在 [`RELEASES.md`](RELEASES.md)；
+- **对外发布一律走 npm**，一个版本号对应一个提交，记在 [`RELEASES.md`](https://github.com/Shaky77/weiwen-law-dsh/blob/main/RELEASES.md)；
 - 要核对"npm 上此刻那份对应哪个提交"，跑 `npm run check:release`（真下载包算指纹，不看自报）。
 
 判断自己装的是哪一份，**看 `buildId`（代码哈希），不看版本号** —— 版本号是人写的，能忘改。
@@ -373,10 +373,10 @@ dsh plugin --profile web add "github:Shaky77/weiwen-law-dsh"
 
 本项目采用**双许可**：
 
-- **开源使用**：**AGPL-3.0**（完整文本见 [LICENSE](./LICENSE)）
+- **开源使用**：**AGPL-3.0**（完整文本见 [LICENSE](https://github.com/Shaky77/weiwen-law-dsh/blob/main/LICENSE)）
 - **商业集成 / 闭源分发 / 预装合作**：可取得**独立于 AGPL-3.0 约束**的授权，请联系 563003@qq.com
 
-外部贡献需签署 CLA（用于支持上述双许可分发），见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+外部贡献需签署 CLA（用于支持上述双许可分发），见 [CONTRIBUTING.md](https://github.com/Shaky77/weiwen-law-dsh/blob/main/CONTRIBUTING.md)。
 
 > **安全漏洞私下报告**：请勿在公开 issue 披露安全问题，直接邮件 563003@qq.com，作者将优先处理。
 
