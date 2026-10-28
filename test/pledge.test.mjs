@@ -11,7 +11,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WeiwenLawEngine } from '../src/core/engine.mjs';
-import { parsePledge, pledgeStatus, resetPledgeUsage, isNarrower } from '../src/core/capability.mjs';
+import { parsePledge, pledgeStatus, resetPledgeUsage, isNarrower, pledgeVerdict, targetsFor } from '../src/core/capability.mjs';
 import { setPledge, narrowPledge, apply } from '../src/index.js';
 
 const REPO = 'C:\\work\\repo';
@@ -232,4 +232,47 @@ test('⓮ 反例锁：永久担保（既无次数也无到期）必须被拒 —
   const r = parsePledge({ actions: ['read'], scope: [REPO] });
   assert.equal(r.ok, false);
   assert.match(r.why, /永久/);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 以下四条来自 2026-10-28 **真 DeepSeek API 实测**（不是设想）：
+//   模型提交 `paths:["notes.md"]`（相对路径）+ 实际动作给绝对路径 ⇒ 被判「违背自陈担保」
+//   并**计入第一 Bug**。三个缺口串成一条链，每一步都让正常动作变成有罪：
+//     ① 落点键表只认单数 `path` ⇒ 模型写的 `paths` 整列漏看
+//     ② `parsePledge` 收下相对路径 ⇒ 它和绝对目标不可比
+//     ③ 不可比落 breach（重罚）而不是 unknown（交人工）
+//   ⇒ 「判不出被读成有罪」是 XSUB-10 的镜像：那里是判不出被读成无风险。
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('⓯ 相对路径不得进担保范围：提交时就失败，并说清怎么改（不等到干活时判成越界）', () => {
+  const r = parsePledge({ actions: ['write'], scope: ['notes.md'], maxUses: 3, reason: '本任务只写这一份' });
+  assert.equal(r.ok, false, '相对路径范围必须被拒 —— 基准是本进程 cwd，引擎无从核对');
+  assert.match(r.why, /绝对路径/);
+  // 补法要能照着改
+  assert.match(r.why, /工作目录/);
+});
+
+test('⓰ 兜底：范围里残留相对路径、目标是绝对路径 ⇒ 判「核对不了」，绝不判越界（越界会计第一 Bug）', () => {
+  resetPledgeUsage();
+  // 绕过入口收口，直接造一张含相对范围的担保（模拟历史遗留 / 其他入口写入）
+  const legacy = { actions: ['write'], scope: [{ raw: 'notes.md', kind: 'path', value: 'notes.md' }], maxUses: 9, expiresAt: new Date(Date.now() + 864e5).toISOString(), __pledge: true };
+  const v = pledgeVerdict({ call: { name: 'write_file', args: { path: REPO + '\\notes.md' } }, layer: 'file-write', pledge: legacy });
+  assert.equal(v.state, 'unknown', '不可比 ⇒ 未知，不是越界');
+  assert.match(v.why, /核不了|无从核对/);
+});
+
+test('⓱ 落点键表收复数与数组：`paths: [...]` 必须被读到（否则担保整列漏看）', () => {
+  const t = targetsFor({ name: 'submit_pledge', args: { paths: [REPO, OTHER] } }, 'read');
+  assert.equal(t.kind, 'path');
+  assert.deepEqual([...t.values].sort(), [REPO.replace(/\\/g, '/'), OTHER.replace(/\\/g, '/')].sort());
+  // 单数仍要工作（不许为了复数把单数弄丢）
+  assert.deepEqual(targetsFor({ name: 'read_file', args: { path: REPO } }, 'read').values, [REPO.replace(/\\/g, '/')]);
+});
+
+test('⓲ 相对文件名是合法的落点：`write_file{path:"notes.md"}` 不得被判「未外化具体作用对象」', async () => {
+  const { ctx, handlers } = mockCtx();
+  apply(ctx);
+  const pre = handlers['tools/pre-execute'];
+  const d = await pre(exec('write_file', { path: 'notes.md', content: '# 纪要' }), next);
+  assert.notEqual(d?.law, '证据不足', '相对路径是合法用法，不能当成"没给目标"');
 });

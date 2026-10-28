@@ -148,7 +148,39 @@ export function matchHost(target, allowed) {
 
 // ---------- 目标解析（动作 → 实际落点集合）----------
 
-const PATH_KEYS = ['path', 'file', 'target', 'dest', 'destination', 'filename'];
+// 落点槽：键名的**语义**（路径 / 文件 / 目标 / 目录），含复数与常见变体。
+//
+// 🔴 为何改成正则、为何必须收复数（2026-10-28 真 DeepSeek API 实测逼出来的，不是设想）：
+//   模型提交担保时把范围写成 `paths: ["…sandbox"]`（复数）。精确表只认 `path` ⇒
+//     ① `targetsFor` 收不到目标 ⇒ 担保判"核对不了"；
+//     ② 适配层 `policeGate` 判"未外化具体作用对象" ⇒ 合法的写入被发回补充。
+//   同一个缺口在两处各犯一次 ⇒ 所以这里抽成**一处定义、两处引用**（同表不同处 = 迟早再分叉）。
+//
+// ⚠️ 这仍是词表（X 轴），不是结构判据。为什么不能改用"值形似路径"的结构形态：
+//   `content` 字段里也常含路径（"把 /etc/passwd 复制到…"），按值形态认会把**要写的内容**
+//   误认成**要写的目标** ⇒ 落点判据当场失真。⇒ 键名语义在此是唯一可用的一维。
+export const LOC_KEY_RE = /^(paths?|files?|filenames?|targets?|dests?|destinations?|dirs?|directories?|folders?|cwd|workdir)$/i;
+
+/**
+ * 从调用参数里取落点槽的值（展开数组、跳过空值、保持顺序）。
+ * 只读键名语义，不看值形态 —— 与 `matchPath` 的"按段包含"是两个层次。
+ */
+export function locValues(args) {
+  const out = [];
+  if (!args || typeof args !== 'object') return out;
+  for (const [k, v] of Object.entries(args)) {
+    if (!LOC_KEY_RE.test(k)) continue;
+    const vals = Array.isArray(v) ? v : [v];
+    for (const x of vals) if (typeof x === 'string' && x.trim()) out.push(x.trim());
+  }
+  return out;
+}
+
+/** 路径是否为绝对（盘符 / 根 / 家目录 / UNC）。相对路径以进程 cwd 为基准，引擎无从核对。 */
+export function isAbsolutePath(p) {
+  const s = String(p ?? '').trim();
+  return /^[a-z]:[\\/]/i.test(s) || s.startsWith('/') || s.startsWith('~') || s.startsWith('\\\\');
+}
 
 /**
  * 本次动作的实际目标集合。
@@ -172,11 +204,7 @@ export function targetsFor(call, layer) {
     }
     return { kind: 'host', values: [...new Set(hosts)] };
   }
-  const out = [];
-  for (const k of PATH_KEYS) {
-    const v = args[k];
-    if (typeof v === 'string' && v.trim()) out.push(normPath(v.trim()));
-  }
+  const out = locValues(args).map(normPath).filter(Boolean);
   if (!out.length) {
     const cmd = String(extractCommand(call)?.cmd ?? '');
     const hits = cmd.match(/(?<=^|[\s=:'"(,])(\/[^\s;|&"'(),]*|\.{1,2}\/[^\s;|&"'(),]*|~\/[^\s;|&"'(),]*)/g) || [];
@@ -412,6 +440,18 @@ export function parsePledge(input) {
   // ⚠️ 刻意剥掉 `__cap`：留着它，一张担保就能被 parseCapability 当通行证收下 ⇒ 两物互相冒充（一桶两义）。
   //   担保与通行证字段同形，但只能各自持有自己的标记。
   const { __cap: _drop, ...rest } = base.cap;
+  // 🔴 相对路径不得进 scope（2026-10-28 真 API 实测：模型提交 `paths:["notes.md"]` ⇒ 误判越界并计第一 Bug）
+  //   相对前缀在 `matchPath` 里只按**目录中段**匹配（`/a/notes.md/b`），末段文件匹配不到 ⇒
+  //   动作给出绝对路径时被判"落在担保范围外" ⇒ **核不了被读成有罪**，还计入第一 Bug（重罚）。
+  //   相对路径的基准是本进程 cwd，引擎不知道 ⇒ 形式不可比。⇒ 入口收口，让它在提交时就失败并说清怎么改，
+  //   而不是等到干活时把正常动作判成越界。`pledgeVerdict` 另有 unknown 兜底（绝不判 breach）。
+  const relScope = (rest.scope ?? []).filter((s) => s.kind === 'path' && !isAbsolutePath(s.value));
+  if (relScope.length) {
+    return {
+      ok: false,
+      why: `担保范围须用绝对路径（收到相对路径：${relScope.map((s) => s.raw).join(' ')}）—— 相对路径以进程工作目录为基准，引擎无从核对；核不了就会被读成越界。`,
+    };
+  }
   return {
     ok: true,
     pledge: {
@@ -506,6 +546,15 @@ export function pledgeVerdict({ call, layer, pledge, now = Date.now() }) {
   if (!scoped.length) {
     const kinds = [...new Set(pledge.scope.map((s) => s.kind))].join('/');
     return { state: 'breach', action, targets, why: `目标类型「${targets.kind}」不在担保范围内（担保只有 ${kinds} 类）` };
+  }
+  // 兜底（防御性；入口已在 parsePledge 收口）：范围里是相对路径、目标是绝对路径 ⇒ 两者不可比。
+  //   「核不了」必须落 unknown（交人工），**绝不落 breach** —— breach 会计第一 Bug，是重罚。
+  //   与 XSUB-10 同源，方向相反：那里是"判不出被读成无风险"，这里是"判不出被读成有罪"。
+  if (targets.kind === 'path') {
+    const rel = scoped.filter((s) => !isAbsolutePath(s.value));
+    if (rel.length && targets.values.some(isAbsolutePath)) {
+      return { state: 'unknown', action, targets, why: `担保范围含相对路径（${rel.map((s) => s.raw).join(' ')}），与绝对目标不可比 ⇒ 无从核对（核不了，不按越界处置）` };
+    }
   }
   const outside = targets.values.filter((v) => !scoped.some((s) => (targets.kind === 'path' ? matchPath(v, s.value) : matchHost(v, s.value))));
   if (outside.length) {

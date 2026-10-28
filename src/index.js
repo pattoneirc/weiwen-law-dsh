@@ -25,7 +25,7 @@ import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
 // [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
 //   不参与判决、不写状态、不进任何闸门 —— 元认知只能读不能管（见 docs/runway-and-criterion §四）。
 import { readout as criterionReadout } from './core/readout.mjs';
-import { parseCapability, capabilityStatus, parsePledge, pledgeStatus, isNarrower } from './core/capability.mjs';
+import { parseCapability, capabilityStatus, parsePledge, pledgeStatus, isNarrower, locValues } from './core/capability.mjs';
 import { strataReadout } from './core/strata.mjs';
 import { NESTED_VARS, M_CONSTRAINT, mDirection, mTwoLayer, mConstraintShape, nestAudit } from './core/nested.mjs';
 // [2026-10-20 12:0x] 变量即动作：R＝查域（动作）、H＝观察者视角（选取）＋ S↔D 张力 L 的三档度量。
@@ -158,6 +158,11 @@ function evidenceOf(call) {
   if (Object.keys(args).length === 0) return null;      // 真空（查询/自查类）→ 不要求，避免误伤
   if (!isIrreversible(call)) return null;               // 可逆/只读 → 不要求物证
   // 不可逆 ⇒ 必须在参数里找到"具体对象"的形态；扫全部字符串值（含嵌套），不认字段名
+  // ⚠️ 先看**落点槽**（2026-10-28 真 API 实测：`write_file{path:"notes.md"}` 被判"未外化具体作用对象"）：
+  //   相对路径是合法用法（基准是进程 cwd），却因为"长得不像绝对路径"被当成"没给目标"。
+  //   落点槽里的非空字符串**本身就是对象**，不需要它形似绝对路径 —— 这一层按键名语义判，下一层才按形态兜。
+  //   两层都要：只有形态层 ⇒ 合法的相对路径被误伤；只有键名层 ⇒ 换个键名夹带就绕过。
+  if (locValues(args).length) return true;
   let sawString = false;
   let sawObject = false;
   const walk = (v, d) => {
