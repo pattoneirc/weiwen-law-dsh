@@ -25,7 +25,7 @@ import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
 // [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
 //   不参与判决、不写状态、不进任何闸门 —— 元认知只能读不能管（见 docs/runway-and-criterion §四）。
 import { readout as criterionReadout } from './core/readout.mjs';
-import { parseCapability, capabilityStatus } from './core/capability.mjs';
+import { parseCapability, capabilityStatus, parsePledge, pledgeStatus, isNarrower } from './core/capability.mjs';
 import { strataReadout } from './core/strata.mjs';
 import { NESTED_VARS, M_CONSTRAINT, mDirection, mTwoLayer, mConstraintShape, nestAudit } from './core/nested.mjs';
 // [2026-10-20 12:0x] 变量即动作：R＝查域（动作）、H＝观察者视角（选取）＋ S↔D 张力 L 的三档度量。
@@ -351,6 +351,86 @@ export function setPrincipalCapability(input) {
   return { ok: rawIn === null ? true : _hostCapError === null, prev, cap: _hostCapability, why: _hostCapError };
 }
 
+// ---------- 担保（Pledge）：被审方自陈的界，只能收窄 ----------
+// 来由（安 2026-10-28）：通行证解决了"谁批准"，但空着"谁承诺"。
+//   她要的是一部可核对的账本：AI 先做推演、交一个界做担保，此后实际动作对不上自己的担保即按第一 Bug 阻止。
+// 🔴 与通行证的**方向相反**，这是它安全的根据：
+//     通行证＝宿主批给你的上限；担保＝你自己承诺的下限（比上限更窄）。
+//     有效面 ＝ 批准面 ∩ 担保面 ⇒ 担保永远只能让允许面变**小**。
+//   ⇒ 所以"被审方提交担保"不违反"不能自签授权"：它签的是认罪的状子，不是放行的条子。
+//     （engine 侧同据此设：担保 pass 不跳任何判据，只有 breach 才生效 —— 见 engine.mjs 担保段。）
+// 🟡 两条来源：`submit_pledge` 工具（AI 自提，先报备后干活）＋ 本函数/`WEIWEN_PLEDGE`（宿主代提）。
+//   两条都只能是收窄 —— 因为收窄之后还要过通行证与刚性锚，担保放不出任何东西。
+let _hostPledge = null;
+let _hostPledgeRaw = null;
+let _hostPledgeErr = null;
+const _pledgeChanges = [];   // 签发/替换/撤回留痕（append-only，上限 20；与证的变更史同构）
+
+/**
+ * 宿主或 AI 提交/替换/撤回担保。替换不累积（旧担保当场失效，旧账不继承）。
+ * @param {object|string|null} input 结构化担保 / JSON 字符串；null 或空串 ⇒ 撤回
+ * @returns {{ok:boolean, prev:object|null, pledge:object|null, why:string|null}}
+ */
+export function setPledge(input) {
+  const prev = _hostPledge;
+  const rawIn = (input === null || input === undefined || (typeof input === 'string' && !input.trim())) ? null : input;
+  if (rawIn === null) {
+    _hostPledge = null; _hostPledgeRaw = null; _hostPledgeErr = null;
+    if (prev !== null) _pledgeChanges.push({ at: new Date().toISOString(), kind: 'revoke', id: prev?.id ?? null });
+  } else {
+    const parsed = parsePledge(rawIn);
+    _hostPledgeRaw = rawIn;
+    if (parsed.ok) {
+      _hostPledge = parsed.pledge; _hostPledgeErr = null;
+      _pledgeChanges.push({
+        at: new Date().toISOString(),
+        kind: prev ? 'replace' : 'declare',
+        id: parsed.pledge.id ?? null,
+        actions: parsed.pledge.actions,
+        scope: parsed.pledge.scope.map((s) => s.raw),
+        maxUses: parsed.pledge.maxUses,
+        expiresAt: parsed.pledge.expiresAt,
+        grounded: !!parsed.pledge.reason,
+      });
+    } else {
+      // 不可解析 ⇒ 清空有效担保但保留原值与原因：引擎侧会因"担保在场但不可解析"而 fail-closed（review）。
+      //   为什么不留着旧担保继续用：宿主/AI 给了一份新担保却被判无效时，悄悄沿用旧的有＝承诺面与当事人意图脱节。
+      _hostPledge = null; _hostPledgeErr = parsed.why;
+      _pledgeChanges.push({ at: new Date().toISOString(), kind: 'invalid', id: null, why: parsed.why });
+    }
+  }
+  if (_pledgeChanges.length > 20) _pledgeChanges.shift();
+  if (prev !== _hostPledge) logline(`pledge ${rawIn === null ? 'revoke' : (_hostPledgeErr ? 'invalid' : 'declare')}`);
+  return { ok: rawIn === null ? true : _hostPledgeErr === null, prev, pledge: _hostPledge, why: _hostPledgeErr };
+}
+
+/**
+ * 被审方自提担保（`submit_pledge` 工具走这里）：**只接受收紧，绝不受理放宽**。
+ *
+ * 🔴 这一条是落地时才发现的缺口，不是实现细节（2026-10-28）：
+ *   若被审方能随时替换自己的担保，那"对不上自己提交的担保就停"形同虚设 ——
+ *   干了坏事之前先改一份宽的担保即可。⇒ 收紧是自伤（允许），放宽是授权（只能宿主给）。
+ *
+ * ⚠️ 还有一条同族纪律：**被拒的提交不改变任何状态**。
+ *   实测踩到：初版把非法提交也写进 `_hostPledgeRaw` ⇒ 引擎读到"担保在场但不可解析"⇒
+ *   此后**每一个调用**都 fail-closed 成 review ⇒ 一次乱填就把 agent 自己锁死（可被用来 DoS）。
+ *   宿主那条路（`setPledge` / 环境变量）保持 fail-closed 不变：那是配置错误，必须响。
+ * @returns {{ok:boolean, prev:object|null, pledge:object|null, why:string|null}}
+ */
+export function narrowPledge(input) {
+  const parsed = parsePledge(input);
+  if (!parsed.ok) {
+    logline(`pledge narrow rejected -> invalid(${parsed.why})`);
+    return { ok: false, prev: _hostPledge, pledge: _hostPledge, why: `担保格式不成立：${parsed.why}` };
+  }
+  const cmp = isNarrower(parsed.pledge, _hostPledge);
+  if (!cmp.ok) {
+    logline(`pledge narrow rejected -> wider(${cmp.why})`);
+    return { ok: false, prev: _hostPledge, pledge: _hostPledge, why: `只能收紧不能放宽：${cmp.why}（放宽须宿主签发，例如 WEIWEN_PLEDGE 或 setPledge）` };
+  }
+  return setPledge(parsed.pledge);
+}
+
 // ---------- 结构入口（宿主集成方侧；模型不可达）：D 破窗复位 ----------
 // 为何这个入口不可缺（结构理由，不是便利功能）：
 //   破窗一旦成立，`pre-execute` 会拒绝**一切**调用 —— **连同"修复动作本身"** ⇒ 宿主侧若无复位入口，
@@ -438,6 +518,15 @@ function observeBoundary(obj) {
 
 function apply(ctx) {
   const engine = new WeiwenLawEngine({ rigidAnchors: DEFAULT_RIGID_ANCHORS });
+  // ── 担保提交入口的声明（可信侧）────────────────────────────────────
+  // 为什么需要：`submit_pledge` 名字里没有动作词 ⇒ 归因判不出动作类别 ⇒ **"提交担保"这个动作自己会被拦**，
+  //   形成"要担保先过闸、过闸又得先有担保"的死循环。实测：不声明 ⇒ review（对外映射成 deny）。
+  // 🔴 为什么这条声明是合法的、不是"给 agent 开后门"：
+  //   ① 它写在适配层（部署者代码）里，**不是**从工具调用参数读的 ⇒ 被审方改不了；
+  //   ② 声明的是"外部影响"面：这个工具**不产生任何外部改动**，只写引擎自己的担保账本，
+  //      而账本只会被下一次**更窄**的提交替换（见 narrowPledge）⇒ 它连"改宽自己"都做不到。
+  //   ⚠️ 它不豁免任何其他判据：真正的动作（write_file / rm …）该怎么判还怎么判。
+  engine.declareTool('submit_pledge', { verb: 'read' });
   // ── 通行证的宿主签发路径②：进程环境变量（启动进程者设定 ⇒ 模型改不了自己的环境）──
   //   为何要有这条：模块级导出只对"能改宿主代码"的集成方可达；DSH 这类宿主未接这一层时，
   //   凭证就永远签不出来 ⇒ 小D 那种"审计通道被自己的闸门拦死"的处境无解。
@@ -446,6 +535,12 @@ function apply(ctx) {
   if (process?.env?.WEIWEN_CAPABILITY) {
     const r = setPrincipalCapability(process.env.WEIWEN_CAPABILITY);
     logline(`env WEIWEN_CAPABILITY -> ${r.ok ? 'declare' : 'invalid(' + r.why + ')'}`);
+  }
+  // ── 担保的宿主代提路径：进程环境变量 ──
+  //   与 WEIWEN_CAPABILITY 同族（启动进程者设定 ⇒ 被审方改不了），但语义相反：一个是批准上限，一个是自陈的界。
+  if (process?.env?.WEIWEN_PLEDGE) {
+    const r = setPledge(process.env.WEIWEN_PLEDGE);
+    logline(`env WEIWEN_PLEDGE -> ${r.ok ? 'declare' : 'invalid(' + r.why + ')'}`);
   }
   // ── 工具声明（层二 · 2026-10-28）：可信侧给"名字里没有动作"的工具报出 verb ──
   //   来由：`glob` / `grep` / `list_dir` 名里无动作词 ⇒ 归因层判不出 ⇒ 一律 review。
@@ -560,6 +655,10 @@ function apply(ctx) {
       //      引擎侧解析一次即可。首版递解析产物 ⇒ 引擎二次解析时 scope 的条目对象被当字符串
       //      ⇒ 一份合法的证被判"作用域为空"（一桶两义的复发，已修，判据见 capability.parseCapability 首部）。
       taskCapability: _hostCapRaw,
+      // 担保（被审方自陈的界）：与通行证并列，但方向相反 —— 它只能把允许面变窄。
+      //   递**原文**（raw），解析在引擎侧做一次（同证的"一桶两义"教训：同一来源只保留一种形态）。
+      //   ⚠️ 未提交 ⇒ null ⇒ 引擎侧本判据不介入 ⇒ 行为与本判据出现前完全一致（零回归）。
+      pledge: _hostPledgeRaw,
       // 将第一BUG结构性标志提到顶层，供 engine.checkFirstBug 读取
       // （DSH 在 exec.arguments 上传这些标志；引擎在 call 上读取）
       selfReference: a.selfReference,
@@ -910,6 +1009,49 @@ function apply(ctx) {
       };
     },
   }));
+  // ── 担保提交（被审方自陈的界 · 2026-10-28 · 安提出）────────────────────
+  //   结构：AI 先报备"我接下来只在这些动作类 × 这些落点 × 这些次数内活动"，此后越出即被拒。
+  //   🔴 为什么这不违反「被审对象不能自己给自己签授权」：担保**只能收窄**。
+  //      有效面 = 宿主通行证 ∩ 担保 ⇒ 自己提一个更宽的界，允许面一点不变（只是账本变松）。
+  //      它签的是认罪的状子，不是放行的条子。
+  //   🟡 参数刻意写成 `paths` / `hosts`（具体落点），不用抽象的 scope 数组。两个理由，都是实测出来的：
+  //      ① 担保本来就该落到具体位置，抽象范围事后核不了；
+  //      ② 带落点的调用才落在本层判据的输入面上。实测：`{actions,scope,maxUses}` ⇒ review
+  //         （XSUB-12 判"有载荷无落点"）；`{actions,paths,maxUses}` ⇒ allow。
+  //         ⇒ 否则"提交担保"这个动作自己会被拦成 review，形成"要担保先过闸、过闸又得先有担保"的死循环。
+  ctx.tools.register(defineTool({
+    name: 'submit_pledge',
+    description: '提交/替换担保（自陈的界）：声明接下来只在【动作类 × 落点 × 次数/到期】内活动，此后越界即被拒并计入第一 Bug。担保只能收窄、不能放宽授权（有效面＝宿主通行证∩担保）。范围越窄越好；不提交则本判据不介入，行为与之前完全一致。',
+    parameters: {
+      actions: { type: 'array', items: { type: 'string' }, description: '动作类，合法值 write/delete/read/send/exec/destroy' },
+      paths: { type: 'array', items: { type: 'string' }, description: '允许的路径前缀（目录或文件）' },
+      hosts: { type: 'array', items: { type: 'string' }, description: '允许对外连接的主机' },
+      maxUses: { type: 'integer', description: '最多兑现次数（与 expiresAt 至少给一个，否则视为永久担保被拒）' },
+      expiresAt: { type: 'string', description: '到期时间 ISO 8601' },
+      reason: { type: 'string', description: '凭什么需要这个范围（推演依据；缺省会标 ungrounded，不拦）' },
+      id: { type: 'string', description: '可选，便于对账的证号' },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: renderObj },
+    async execute(args) {
+      const scope = [
+        ...(Array.isArray(args?.paths) ? args.paths : []),
+        ...(Array.isArray(args?.hosts) ? args.hosts.map((h) => (/^host:/i.test(String(h)) ? h : 'host:' + h)) : []),
+      ];
+      const r = narrowPledge({
+        id: args?.id, actions: args?.actions, scope,
+        maxUses: args?.maxUses, expiresAt: args?.expiresAt, reason: args?.reason,
+      });
+      return {
+        ok: r.ok,
+        why: r.why,
+        pledge: pledgeStatus(r.pledge),
+        previous: r.prev ? { id: r.prev.id, actions: r.prev.actions, scope: r.prev.scope.map((s) => s.raw) } : null,
+        note: r.ok
+          ? '担保已生效（替换旧担保，不累积）。它只能让允许面变窄 —— 不会因此多出任何权限。'
+          : '担保未被接受：上面 why 是具体原因。不生效时引擎行为与未提交完全一致（不含任何放宽或收紧）。',
+      };
+    },
+  }));
   // ── 通行证状态（只读面）────────────────────────────────────────────
   //   为何必须有个自省面：凭证的判据是「三件事」（动作类 / 作用域 / 次数与到期），
   //   而这三件都在宿主侧设定。被测方若看不见自己的证长什么样，就只能靠猜措辞——正是
@@ -926,10 +1068,15 @@ function apply(ctx) {
         bundleId: BUNDLE_ID,
         loadedAt: LOADED_AT,
         ...capabilityStatus(_hostCapability, _hostCapRaw, _hostCapError),
+        // 担保：一本可核对的账本 —— 提交的界 vs 实际兑现/越界
+        pledge: pledgeStatus(_hostPledge),
+        pledgeChanges: _pledgeChanges.slice(-10),
         changes: _capChanges.slice(-10),
         issuePaths: [
           'setPrincipalCapability(cap) —— 宿主模块级导出（模型不可达）',
           'WEIWEN_CAPABILITY=<json> —— 进程环境变量（启动进程者设定）',
+          'submit_pledge —— 被审方自提的担保（只能收窄，不能放宽）',
+          'WEIWEN_PLEDGE=<json> —— 宿主代提担保（进程环境变量）',
         ],
         note: '只读面：不产生 verdict、不写状态、不参与闸门。未签发时引擎行为与本判据出现前完全一致；签发后：刚性锚 deny 不变、出界必 review，只有"域内且无锚可归"的动作会由 review 变 allow（那是补上可验证的归属，不是放宽）。',
       };

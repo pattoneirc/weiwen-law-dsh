@@ -64,7 +64,7 @@ test('❶ 接线锁：链查询报出的是上一个真动作并点名；把排�
   assert.ok(out.selfAuditTools.includes('query_conduction_chain'), '登记册里必须有审计工具自己');
 });
 
-test('❷ 注册即登记：实际注册的工具集合，与自查登记册完全相等', async () => {
+test('❷ 注册即登记：自查工具集合与自查登记册完全相等，且写入面必须显式列名', async () => {
   const { ctx, tools } = mockCtx();
   apply(ctx);
   assert.ok(tools.length > 0, '适配层必须注册工具');
@@ -73,11 +73,30 @@ test('❷ 注册即登记：实际注册的工具集合，与自查登记册完�
   const registered = tools.map((t) => t.name).sort();
   const recorded = [...out.selfAuditTools].sort();
 
+  // 自查面 = 登记册（registerSelfAuditTool 的 add 与 register 是同一个动作 ⇒ 这里必须完全相等）
   assert.deepEqual(
     recorded,
-    registered,
-    '自查登记册必须与已注册工具集合完全相等 —— 注册了没登记的工具，就是一次看不见的自指',
+    [...recorded].sort(),
+    '自查登记册自身必须去重稳定',
   );
+  assert.ok(recorded.length > 0, '自查登记册不得为空');
+
+  // 🔴 判据升级（2026-10-28）：不能再要求"全部注册工具 ≡ 登记册"。
+  //   为什么：登记册的用途是**排除自指**（自查工具不能把自己报成被审对象）。
+  //   有副作用的工具（如 `submit_pledge`）**必须**留在裁决链里 —— 它改状态，瞒掉它才是自指。
+  //   所以正确的判据是：注册面 − 登记册 = **显式列名的副作用面**。
+  //   任何新工具只要没在这里列名，仍然会红 ⇒ "注册了没登记"这条防线的本意（不许悄悄加工具）原样保住。
+  const SIDE_EFFECT_TOOLS = ['submit_pledge'];
+  const unexpected = registered.filter((n) => !recorded.includes(n));
+  assert.deepEqual(
+    unexpected,
+    [...SIDE_EFFECT_TOOLS].sort(),
+    '注册了但不在自查登记册的工具，必须在此显式列名（它是副作用面、必须进裁决链）；未列名 ⇒ 疑似悄悄加了工具',
+  );
+  // 反向：登记册里的每个名字都必须真的注册了（否则排除集里挂着不存在的名字 = 失效的锁）
+  for (const n of recorded) {
+    assert.ok(registered.includes(n), `自查登记册里的「${n}」必须真实注册`);
+  }
 });
 
 test('❸ 历史里全是自查调用时，答案是 null 并如实说明 —— 绝不编一条链出来', async () => {

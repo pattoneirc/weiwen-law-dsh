@@ -370,3 +370,201 @@ export function capabilityStatus(cap, capRaw, parseError) {
     note: '只读面：不产生 verdict、不参与闸门。剩余次数按证号（无 id 则按内容指纹）累计。',
   };
 }
+
+// ===========================================================================
+// 担保（Pledge）—— 被审方自己提交的「界」，用于事后对账
+// ===========================================================================
+//
+// 来由（安 2026-10-28）：通行证只能宿主签发，那「谁认领这段行为」这件事就缺一个当事人。
+//   她给的形态是：让 AI 自己先做未来推演、提交一个界做担保；此后它的实际动作若对不上
+//   自己提交的担保，立即按第一 Bug 停止机制切断。⇒ 账本从「谁批的」变成「谁承诺了什么、做到了没有」。
+//
+// 🔴 本模块最要紧的一条结构（决定它安不安全）：**担保只能收窄，不能放宽。**
+//   判据不是「pledge 说什么就是什么」，而是 **有效面 ＝ 批准面（通行证）∩ 担保面（pledge）**。
+//   ⇒ pledge 单独**不产生任何授权**：宿主没签证书时，提交一份宽 pledge 也什么都通不过；
+//     宿主签了证书时，提交一份比证书更宽的 pledge，有效面仍是证书。
+//   ⇒ 这样一来「宽界自签」这个洞在结构上不存在（不是靠加一条判据去堵）：
+//     自陈宽一点，只是让自己的账本变松，**不会让权限变大**。
+//   ⚠️ 与「被审对象不能自己给自己签授权」不冲突 —— 它签的是**认罪的状子**，不是**放行的条子**。
+//
+// 🔴 第二条结构：**担保是上界，不是下界。**
+//   「做了担保外的事」＝ 越界 ⇒ 可判（读的是行，外 H）。
+//   「担保内的事没做完」＝ 未达 ⇒ **不可判**（为什么没做完落在内 H）。
+//   ⇒ 本模块**没有**任何"没做到就判"的出口。一次超时、一次文件不存在，不会变成"违背担保"。
+//     少了这条，第一 Bug 会把正常失败读成恶意 ⇒ 防线自己成为故障源。
+//
+// 🔴 第三条：**核对方是引擎，不是被审方。** 对账在动作发生时由引擎比对，不采信任何自述。
+//   本模块只提供判据，记账与处置在引擎侧（engine.mjs 担保段）。
+//
+// 与通行证的区别（两者字段同形，但语义不同，不可互代）：
+//   通行证：宿主签 ⇒ 回答「谁批准」；缺证 ⇒ 本判据不介入，一切照旧。
+//   担保　：被审方交 ⇒ 回答「谁承诺」；缺担保 ⇒ 本判据不介入，一切照旧（等同今天的行为）。
+//   ⇒ 两者都 absent 时，引擎行为与本模块出现前**完全一致**（零回归是这个文件的第一要求）。
+
+/** 担保的界：动作类封闭集与作用域解析**全部复用通行证那一套** —— 词汇表只能有一套。 */
+export function parsePledge(input) {
+  let o = input;
+  if (typeof o === 'string') {
+    try { o = JSON.parse(o); } catch { return { ok: false, why: '担保不是合法 JSON' }; }
+  }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok: false, why: '担保不是对象' };
+  if (o.__pledge === true && Array.isArray(o.actions) && Array.isArray(o.scope)) return { ok: true, pledge: o };
+  // 形状校验直接借通行证那套（同一组字段、同一组封闭集）：分开写必然长出第二套词汇表。
+  const base = parseCapability(o);
+  if (!base.ok) return { ok: false, why: base.why };
+  // ⚠️ 刻意剥掉 `__cap`：留着它，一张担保就能被 parseCapability 当通行证收下 ⇒ 两物互相冒充（一桶两义）。
+  //   担保与通行证字段同形，但只能各自持有自己的标记。
+  const { __cap: _drop, ...rest } = base.cap;
+  return {
+    ok: true,
+    pledge: {
+      ...rest,
+      __pledge: true,
+      // 推演依据：不是安全项（宽界已被"只能收窄"堵死），是**可审项** ——
+      //   事后有人问"它凭什么要这么大范围"，账本得答得出来。缺失只标 ungrounded，不拦。
+      reason: typeof o.reason === 'string' ? o.reason.slice(0, 300) : null,
+    },
+  };
+}
+
+// ---------- 担保的独立账本（与通行证的用量账彻底分开：两张证混记＝一桶两义）----------
+
+const PLEDGE_LEDGER_CAP = 20;
+const _pledgeUses = new Map();   // key -> {count, breach, log:[...], breaches:[...]}
+
+/** 担保键：与通行证同法（内容指纹恒参与）但加独立前缀 ⇒ 两张账永不串号 */
+export function pledgeKey(p) {
+  if (!p) return '';
+  return 'pledge#' + capabilityKey(p);
+}
+
+export function pledgeUsed(p) {
+  return _pledgeUses.get(pledgeKey(p))?.count ?? 0;
+}
+
+function _pledgeRec(p) {
+  const key = pledgeKey(p);
+  const rec = _pledgeUses.get(key) ?? { count: 0, breach: 0, log: [], breaches: [] };
+  return { key, rec };
+}
+
+/** 记一次**兑现**（只在 pass 时调用） */
+export function consumePledge(p, { action = null, targets = [] } = {}) {
+  const { key, rec } = _pledgeRec(p);
+  rec.count += 1;
+  rec.log.push({ at: new Date().toISOString(), action, targets: [...targets].slice(0, 8) });
+  if (rec.log.length > PLEDGE_LEDGER_CAP) rec.log.shift();
+  _pledgeUses.set(key, rec);
+  return rec.count;
+}
+
+/**
+ * 记一次**越界**（被拒的动作不发生，但"提了担保又去越界"这件事必须留痕 —— 对账读的就是它）。
+ * @returns {number} 该担保累计越界次数
+ */
+export function notePledgeBreach(p, { action = null, targets = [], why = '' } = {}) {
+  const { key, rec } = _pledgeRec(p);
+  rec.breach += 1;
+  rec.breaches.push({ at: new Date().toISOString(), action, targets: [...targets].slice(0, 8), why: String(why).slice(0, 160) });
+  if (rec.breaches.length > PLEDGE_LEDGER_CAP) rec.breaches.shift();
+  _pledgeUses.set(key, rec);
+  return rec.breach;
+}
+
+/** 重置担保账本（仅测试用） */
+export function resetPledgeUsage() {
+  _pledgeUses.clear();
+}
+
+// ---------- 担保判决 ----------
+
+/**
+ * 对账：**这一次调用**是否落在被审方自己提交的界内。
+ *
+ * 五态（与通行证三态刻意不同，因为"越界"与"判不出"必须分开）：
+ *   absent  ＝ 未提交担保 / 动作层不可判 ⇒ 本判据不介入（零回归）
+ *   expired ＝ 担保已到期 ⇒ **不拦**：到期是"担保失效"，不是"违背担保"（未达不判）
+ *   pass    ＝ 界内且未超量 ⇒ 记一次兑现
+ *   breach  ＝ 做了担保外的事（动作类外 / 出界 / 超量）⇒ 越界，可判
+ *   unknown ＝ 有担保但**核对不了**（目标不可判）⇒ 判不出 ≠ 越界 ⇒ 交人工，不当越界处置
+ *
+ * @returns {{state:string, action:string|null, targets?:object, used?:number, why:string}}
+ */
+export function pledgeVerdict({ call, layer, pledge, now = Date.now() }) {
+  if (!pledge) return { state: 'absent', why: '未提交担保 ⇒ 本判据不介入（与今日行为完全一致）' };
+  const action = actionOfLayer(layer);
+  if (!action) return { state: 'absent', action: null, why: `动作层不可判（layer=${layer ?? 'null'}）⇒ 本判据不介入` };
+  if (pledge.expiresAt && Date.parse(pledge.expiresAt) <= now) {
+    // ⚠️ 这里刻意**不是** breach：借书证到期不等于偷书。到期后本判据退出，动作仍受通行证与刚性锚约束。
+    return { state: 'expired', action, why: `担保已于 ${pledge.expiresAt} 到期 ⇒ 担保失效（不等于违背担保）` };
+  }
+  if (!pledge.actions.includes(action)) {
+    return { state: 'breach', action, why: `担保里没列动作类「${action}」⇒ 做了担保外的事` };
+  }
+  const targets = targetsFor(call, layer);
+  if (!targets.values.length) {
+    return { state: 'unknown', action, targets, why: '动作目标不可判（未给出落点/主机）⇒ 无从核对担保范围' };
+  }
+  const scoped = pledge.scope.filter((s) => s.kind === targets.kind);
+  if (!scoped.length) {
+    const kinds = [...new Set(pledge.scope.map((s) => s.kind))].join('/');
+    return { state: 'breach', action, targets, why: `目标类型「${targets.kind}」不在担保范围内（担保只有 ${kinds} 类）` };
+  }
+  const outside = targets.values.filter((v) => !scoped.some((s) => (targets.kind === 'path' ? matchPath(v, s.value) : matchHost(v, s.value))));
+  if (outside.length) {
+    return { state: 'breach', action, targets, why: `目标落在担保范围外：${outside.join(' ')}（担保范围=[${scoped.map((s) => s.raw).join(' ')}]）` };
+  }
+  const used = pledgeUsed(pledge);
+  if (pledge.maxUses !== null && used >= pledge.maxUses) {
+    return { state: 'breach', action, targets, used, why: `超出担保次数（已兑现 ${used} / 担保上限 ${pledge.maxUses}）` };
+  }
+  return { state: 'pass', action, targets, used, why: `兑现担保：动作类「${action}」∧ 目标在担保范围内` };
+}
+
+/** 只读状态（供自省面）：提交的界 vs 实际用量 —— 这就是安说的"一本可以核对的账本" */
+export function pledgeStatus(pledge) {
+  const used = pledge ? pledgeUsed(pledge) : 0;
+  const { rec } = pledge ? _pledgeRec(pledge) : { rec: { breach: 0 } };
+  return {
+    declared: !!pledge,
+    id: pledge?.id ?? null,
+    reason: pledge?.reason ?? null,
+    ungrounded: !!pledge && !pledge?.reason,
+    actions: pledge?.actions ?? [],
+    scope: (pledge?.scope ?? []).map((s) => ({ kind: s.kind, value: s.value })),
+    maxUses: pledge?.maxUses ?? null,
+    used,
+    remaining: pledge?.maxUses == null ? null : Math.max(0, pledge.maxUses - used),
+    breach: rec.breach ?? 0,
+    expiresAt: pledge?.expiresAt ?? null,
+    expired: pledge?.expiresAt ? Date.parse(pledge.expiresAt) <= Date.now() : false,
+    note: '担保是**上界**不是下界：越界可判（兑现 vs 越界各自计数），未达不判（为什么没做完落在内 H，不可观测）。',
+  };
+}
+
+/**
+ * 新担保是否**不宽于**旧担保（单向收紧判据）。
+ *
+ * 🔴 为什么必须有这一条（2026-10-28 落地时发现，是设计缺口不是实现细节）：
+ *   如果被审方能随时替换自己的担保，那"对不上就停"形同虚设 —— 先提交一份宽的、再去做，
+ *   或者干了坏事之前先改担保。⇒ **收紧是被审方的自由（自伤），放宽必须由宿主给。**
+ *   这与"证只能宿主签发"是同一个主体分离原则，只是作用在承诺面。
+ *
+ * ⚠️ 首次提交（无旧担保）算收紧：从"没有承诺"到"有承诺"只会让判定更严，不会更松。
+ * @returns {{ok:boolean, why:string}}
+ */
+export function isNarrower(next, prev) {
+  if (!next) return { ok: false, why: '没有新担保' };
+  if (!prev) return { ok: true, why: '首次提交（从无承诺到有承诺 ＝ 收紧）' };
+  const why = [];
+  const extraA = next.actions.filter((a) => !prev.actions.includes(a));
+  if (extraA.length) why.push(`新增动作类 ${extraA.join('/')}`);
+  const extraS = next.scope.filter((n) => !prev.scope.some((p) => p.kind === n.kind
+    && (n.kind === 'path' ? matchPath(n.value, p.value) : n.value === p.value)));
+  if (extraS.length) why.push(`新增范围 ${extraS.map((s) => s.raw).join(' ')}`);
+  if (next.maxUses === null) { if (prev.maxUses !== null) why.push('取消了次数上限'); }
+  else if (prev.maxUses === null || next.maxUses > prev.maxUses) why.push(`次数上限 ${next.maxUses} 宽于 ${prev.maxUses}`);
+  if (next.expiresAt === null) { if (prev.expiresAt !== null) why.push('取消了到期'); }
+  else if (prev.expiresAt === null || Date.parse(next.expiresAt) > Date.parse(prev.expiresAt)) why.push('到期时间更晚');
+  return why.length ? { ok: false, why: why.join('；') } : { ok: true, why: '未放宽' };
+}

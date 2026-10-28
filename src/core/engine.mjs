@@ -7,7 +7,9 @@
 // 未修复前禁止重入，从根上阻断"只反推不修复→无限递归"。
 import { BugStopGuard, bugKeyOf } from './bugstop.mjs';
 import { attributeCall, extractCommand, commandLayer, DELETION_LAYERS, GIT_DESTRUCTIVE, speechProfile, actionProfile, CONTAINER_VERBS, domainOf, declaredAnchors, scarUnanchored } from './attribution.mjs';
-import { parseCapability, capabilityVerdict, consume } from './capability.mjs';  // 通行证（宿主签发的结构凭证）：动作类 × 作用域 × 次数/到期。判据与词汇归 capability，引擎只消费（同 attribution 分工）
+import { parseCapability, capabilityVerdict, consume, parsePledge, pledgeVerdict, consumePledge, notePledgeBreach } from './capability.mjs';  // 通行证（宿主签发的结构凭证）：动作类 × 作用域 × 次数/到期。判据与词汇归 capability，引擎只消费（同 attribution 分工）
+  // ↑ 担保（pledge）也归 capability：与通行证**字段同形、语义相反**（证是批准，担保是自陈）。
+  //   🔴 引擎侧只允许它**收紧**：担保 pass 不产生任何放行效果（不跳痕锚、不跳推演），breach 才生效。这条位置本身就是安全边界。
   // 路径1 归因 + 其产出的删除/破坏类语义层集合（词汇归 attribution 所有，引擎仅消费）  // [2026-09-23 字典即S] commandLayer（破坏标记的唯一读法：字典词素 + 工具名封闭集，引擎只消费不自兜底）  // [2026-09-24 同构回填 · EN 09-18/19/20 批次] 言行轴（speechProfile/actionProfile）· 容器类别集（CONTAINER_VERBS：容器与实质不可比则不比）· R 域归属（domainOf：域全集覆盖、永不返空 ⇒ 堵"空值 ⇒ 不可比 ⇒ fail-open"洞）· 痕锚归属（declaredAnchors/scarUnanchored：scar 类动作归不到已声明锚 ⇒ review）。词汇与判据归 attribution，引擎只消费（不自兜底、不扩词表）。
 import { R_DOMAIN, FRACTAL_PROPERTY } from './law.mjs';  // R 域刚性锚点常量 + 分形属性常量：destructive 检测须体现 R_DOMAIN 边界法则；跨调用组合须接 FRACTAL_PROPERTY 分形横向递归（接线，非加层）
 import { SAccountLedger, classifyReversibility, rDomainsForLayer } from './ledger.mjs';  // [2026-09-24 同构回填 · EN 2026-09-20] S 账本（用户账本模型）：R=字典 / SD=轴标记 / term 字典序索引 / S≠R 异类 / 疤窗可逆性。仅附加记录结构，不参与裁决判定（守"禁区"红线：不做全局强制自检）。
@@ -2443,6 +2445,74 @@ export class WeiwenLawEngine {
       }
       // pass 才计数（fail 不消耗次数：被拦下的动作没有发生，记了会把次数耗在没做的事上）
       if (capVerdict.state === 'pass') consume(cap, { action: capVerdict.action, targets: capVerdict.targets.values });
+    }
+    // ═══ 担保对账（安 2026-10-28）：被审方自己提交的「界」，核的是"谁承诺了什么、做到了没有" ═══
+    //   与通行证的分工：证回答**谁批准**（授权面），担保回答**谁承诺**（承诺面）。
+    // 🔴 引擎侧只允许担保**做减法**：pass 只记一次兑现，**不跳任何后续判据**（不跳痕锚、不跳推演）
+    //    ⇒ 担保在结构上不可能放宽授权 —— 它没有"放行"这个出口，只有"拒绝"和"记账"。
+    // 🟡 未达不判：本段只在**动作发生时**判越界，从不事后追问"担保内的事你做完没有"
+    //    （为什么没做完落在内 H，不可观测；拿不可观测的量做闸门 = XSUB-10 的老病）。
+    const pledgeRaw = call?.pledge ?? null;
+    let pledge = null, pledgeV = null;
+    if (pledgeRaw) {
+      const parsedP = parsePledge(pledgeRaw);
+      if (!parsedP.ok) {
+        // 同通行证的处理：给了一份读不懂的担保 ⇒ 承诺面不可判 ⇒ 交人，**不得静默当没提**
+        this._mark('R', { step: '划定边界 · 担保（自陈的界是否可判）', hit: true, cuts: true, note: `担保不可解析：${parsedP.why}` });
+        return {
+          kind: 'review',
+          law: 'R',
+          reason: `被审方提交的担保不可解析（${parsedP.why}）⇒ 承诺面不可判 ⇒ 返回人类裁决，不猜`,
+          attrib,
+          deduced: true,
+          pledge: { state: 'invalid', why: parsedP.why },
+        };
+      }
+      pledge = parsedP.pledge;
+      pledgeV = pledgeVerdict({ call, layer: attrib?.layer ?? null, pledge });
+      this._mark('R', {
+        step: '划定边界 · 担保对账（自陈的界 vs 本次动作）',
+        hit: pledgeV.state === 'breach',
+        cuts: pledgeV.state === 'breach',
+        targets: pledgeV.targets ? pledgeV.targets.values : null,
+        note: `${pledgeV.state} · ${pledgeV.why}`,
+      });
+      if (pledgeV.state === 'breach') {
+        // 越界 ⇒ **立刻拒绝这次动作**（动作没有发生）＋ 第一 Bug 计数 +1。
+        //   ⚠️ 为什么是"拒动作 + 计偏离"，不是当场置 windowBroken：
+        //      单次越界可能是我方判据误差（铁律 #11「先取证，不许推理定案」），一次就断窗会把工程问题
+        //      变成会话死锁（须人工 heal）⇒ 防线自己成了故障源。而"拒绝这次动作"本身已兑现"立刻阻止"。
+        //      连续越界累积到**既有**阈值 mHumanCap/maxFailureStreak 即自动停机 —— 用现成阈值承载，不新拍阈值。
+        notePledgeBreach(pledge, { action: pledgeV.action, targets: pledgeV.targets?.values ?? [], why: pledgeV.why });
+        this.failureStreak += 1; // 与 R 命中同权：违背自陈担保是确定的偏离，不是灰区
+        const mkP = this._markIntercept(call, bugKeyOf(call));
+        if (mkP.human) {
+          return this._toHuman({ law: 'R', bugKey: bugKeyOf(call), closedLoop: false, systemKey: mkP.systemKey, call,
+            reason: `同一系统「${mkP.systemKey}」违背自陈担保累计 ${mkP.sysCount} 次，达封顶 ${mkP.cap}：AI 停止纠结，转人工决策` });
+        }
+        return {
+          kind: 'deny',
+          law: 'R',
+          reason: `违背自陈担保（${pledgeV.why}）⇒ 越界动作已拒（第一 Bug 计数 ${this.failureStreak}，达阈即断窗止损）`,
+          attrib,
+          deduced: true,
+          pledge: pledgeV,
+          mMark: mkP,
+        };
+      }
+      if (pledgeV.state === 'unknown') {
+        // 判不出 ≠ 越界：目标不可判 ⇒ 无从核对 ⇒ 交人（既不当越界处置，也不静默放过）
+        return {
+          kind: 'review',
+          law: 'R',
+          reason: `担保在场，但本次动作核对不了（${pledgeV.why}）⇒ 判不出即交还，不猜`,
+          attrib,
+          deduced: true,
+          pledge: pledgeV,
+        };
+      }
+      // pass 只记兑现；expired 只说明担保失效（到期 ≠ 违背）—— 两者都不放行、不放宽
+      if (pledgeV.state === 'pass') consumePledge(pledge, { action: pledgeV.action, targets: pledgeV.targets.values });
     }
     // 证已放行 ⇒ 归属已有人认领，不再走痕锚猜测；否则照旧（行为零回归）
     const scar = capVerdict && capVerdict.state === 'pass' ? null : scarUnanchored(call, attrib, this.anchorPool);
