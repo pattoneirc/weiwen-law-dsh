@@ -657,6 +657,62 @@ function apply(ctx) {
     },
   };
 
+  // ---------- 破窗解冻：把「转人工」接上返回通道（2026-10-29 · 安亲问） ----------
+  // 病灶：破窗后除了重启进程/卸载插件，还有没有别的解除办法？修前答案是「没有」——
+  //   `healBrokenWindow()` / `resolveBug()` / `settleWindow()` 三条全是宿主 API 或需要 bug 记录，
+  //   agent 够不着，用户也没有入口 ⇒ 破窗＝会话级死锁（本文件 447 行注释自己承认了）。
+  //   对 agent 的后果更糟：话术写着「你有三条路」，三条全堵 ⇒ 挨个撞三次才承认无路 ⇒ **这就是幸存者模式的燃料**。
+  //
+  // 「对话框文本不算数」这条纪律是对的，但它管的是**文本不能授权动作**（防伪造委托人）；
+  //   它从没说过「人不能裁决」。宿主本来就提供了结构化裁决通道 —— `ctx.approval`（@deepseek-ai/dsh-user-approval）：
+  //   它是 waterfall 服务 + `approval/asked`/`approval/decided` 审计对，可回放、可追溯，**不是聊天记录**。
+  //   我们一直没用它 ⇒ 于是「转人工」只有出站、没有回站。
+  //
+  // 语义边界（必须写清，否则就是开后门）：
+  //   · 批的是**状态**（是否允许系统尝试自愈），不是动作 ⇒ 一次审批换一段配额，不换一步。
+  //     `allowed-once` 的"once"在这里指"这一次解冻"，不是"这一次调用"。把状态伪装成动作去逐次授权，才是滑移。
+  //   · 配额内仍走完 R/H/M 判据；外传/删除/系统路径/凭据**一律不放**（引擎 BUFFER_BLOCK_CATS + 落点判据）。
+  //   · 无人应答 `unavailable` ⇒ fail-closed，与无人值守一致；明确拒绝 ⇒ 冷静期内不再询问（不骚扰）。
+  const BUFFER_QUOTA = 12;
+  const APPROVAL_COOLDOWN_MS = 5 * 60 * 1000;
+  let _refusedAt = 0;
+
+  const requestBufferGrant = async (exec, decision) => {
+    if (Date.now() - _refusedAt < APPROVAL_COOLDOWN_MS) return false;   // 刚被拒过 ⇒ 不骚扰
+    let approval = null;
+    // 官方惯例（dsh-tools 3196 同款）：ctx.get('approval') 机会式取用，无服务则 fail-closed。
+    approval = (typeof ctx.get === 'function' ? ctx.get('approval') : null) ?? ctx.approval ?? null;
+    if (!approval || typeof approval.request !== 'function') return false;
+    if (!exec?.agent) return false;   // 无 agent 上下文 ⇒ 不知道问谁 ⇒ fail-closed
+    try {
+      const out = await approval.request({
+        agent: exec.agent,
+        toolName: exec.name ?? 'unknown',
+        callId: exec.callId,
+        reason: [
+          '【唯稳律 · 破窗止损 · 请求解冻】',
+          `系统处于破窗止损态（${engine.failureStreak}/${engine.maxFailureStreak}），刚才这条 "${exec?.name}" 被 D 层拦下。`,
+          `是否授予一段缓冲配额（至多 ${BUFFER_QUOTA} 次「本机 / 可回滚 / 无外部落点」的动作），让它自己完成 反推→溯源→修复？`,
+          '· 允许：只放开破窗这一道门；外传、删除、系统路径、凭据仍全部拒绝；其余判据照旧；修好后自动复位。',
+          '· 拒绝：保持锁定，5 分钟内不再询问。',
+          '· 不答：保持锁定（与无人值守一致，属预期行为）。',
+          '说明：这不是"聊天里说一句就算数"——你的决定会记为 approval/asked + approval/decided 审计对，可回放。',
+          '另：解除破窗不需要重启进程，也不需要卸载插件。',
+        ].join('\n'),
+      });
+      if (out === 'allowed-once') {
+        engine.grantBuffer(BUFFER_QUOTA, '委托人经审批通道解冻（非被审方自签）');
+        logline(`buffer granted via approval (${BUFFER_QUOTA}) — 破窗解冻由委托人裁决`);
+        return true;
+      }
+      if (out === 'rejected') { _refusedAt = Date.now(); logline('buffer approval rejected → 冷静期内不再询问'); }
+      else logline(`buffer approval outcome=${out} → 保持锁定（fail-closed）`);
+    } catch (e) {
+      logline(`buffer approval failed: ${e?.message ?? e} → fail-closed`);
+    }
+    return false;
+  };
+
   // ---------- R / D / S / H / M 总裁决：工具调用前置闸门（waterfall） ----------
   ctx.on('tools/pre-execute', async (exec, next) => {
     channel.callSites.total += 1;
@@ -698,8 +754,18 @@ function apply(ctx) {
       logline(`pre-execute ${exec?.name} -> police gate (证据不足·发回补充)`);
       return gate;
     }
-    const decision = engine.decideToolCall(call);
+    let decision = engine.decideToolCall(call);
     logline(`pre-execute ${exec?.name} -> ${decision.kind}${decision.law ? '(' + decision.law + ')' : ''}`);
+    // [2026-10-29] 破窗 + 无缓冲余额 ⇒ 问委托人是否解冻。批准后**重判**（重判才走缓冲档，仍过 R/H/M）。
+    //   为何在 deny 之后问、而不是先问：先判才知道该不该问 —— 若这条动作本来就能过（allow），
+    //   弹窗就是纯骚扰；若它连缓冲射程都不在（外传/删除），问了也白问（重判仍 deny）。
+    if (decision.kind === 'deny' && decision.law === 'D' && engine.bufferRemaining <= 0) {
+      const granted = await requestBufferGrant(exec, decision);
+      if (granted) {
+        decision = engine.decideToolCall(call);
+        logline(`pre-execute ${exec?.name} -> 解冻后重判 ${decision.kind}${decision.law ? '(' + decision.law + ')' : ''} | buffer ${engine.bufferSnapshot().display}`);
+      }
+    }
     if (decision.kind === 'deny' || decision.kind === 'review') {
       markBlocked(exec);   // 同上：拦住 ≠ 失败
       // 阻断该步、不扩散（D 破窗止损 / M 以断保续 / 推演中高风险兜底）

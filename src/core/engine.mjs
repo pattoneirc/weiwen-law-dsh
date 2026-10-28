@@ -356,6 +356,11 @@ export function inferCategory(call) {
 //   用途：决定「审查强度」。不可逆才要求归因与物证；可逆/只读不要求 ——
 //   既不把"没看"当"没事"（fail-open），也不把只读翻成拦截（误伤）。
 const IRREVERSIBLE_CATS = new Set(['write', 'exec-destructive', 'exfil', 'exfil-net']);
+// [2026-10-29 · 幸存者模式修正 · 缓冲档] 破窗态下**仍不许做**的类别（射程＝会扩散到外部/不可撤回）。
+//   为什么不用 `isIrreversible`（它把 write/edit 也算不可逆）：那是**回滚成本**的判据，不是**扩散**的判据。
+//   破窗要防的是扩散，不是"改了东西"。本地改代码有版控可退，不构成扩散；外传/破坏性执行才构成。
+//   ⇒ 两条判据各管一件事，混用会让缓冲区连"改本地代码"都放不过 ⇒ 修复循环仍旧断（探针三实测：5 个修复动作全灭）。
+const BUFFER_BLOCK_CATS = new Set(['exec-destructive', 'exfil', 'exfil-net']);
 // 破坏语义词素（例示，非完备清单）：认**语素**不认完整名，宿主任意命名都命中。
 //   刻意不含 exec|shell|bash|pwsh|cmd|run|spawn —— 那些是**执行通道名**（能跑命令），不是**动作意图**（要破坏）；
 //   混进来会把「用 pwsh 列个目录」判成不可逆 ⇒ 只读也被要求归因/物证（实跑误伤）。
@@ -857,6 +862,18 @@ const SHELL_OP = /(\$\{|`|\$\(|\&\&|\|\|)/;
 // ⚠️ 本豁免**只关 H 层内容闸这一门**：R 层的凭据（不问自取视为偷）、删除不可逆无锚、
 //   外发落点、exec 容器，一条不动。赦免的是"这段内容要不要被当注入审"，不是"这个动作能不能做"。
 const LOCAL_RW_LAYERS = new Set(['file-read', 'file-write']);
+// 🔴 [2026-10-29 · 缓冲档] 落点是否为「本机形态」。判据取**形态**（scheme 头 / UNC 前缀），不取可达性
+//   （"这个路径本机能不能到"要读文件系统，判据里不做 I/O）。
+//   ⚠️ 与上面 isLocalReadWrite 的分工：那里**刻意不判** URL/UNC（attribution 的 declConflicts 已判，再判是死分支，
+//     我 10-29 亲测三处变异不红）。但缓冲档不走 attribution（exec 类没有"落点参数"可归层），
+//     故此处必须自判形态 —— **同一个问题在不同判据位置，答案不同**，不是"又写了一遍"。
+function isLocalLocator(p) {
+  const s = String(p ?? '').trim();
+  if (!s) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return false;
+  if (s.startsWith('\\\\') || s.startsWith('//')) return false;
+  return true;
+}
 function isLocalReadWrite(call, decl = null) {
   const a = attributeCall(call, decl);
   if (!a.ok || !LOCAL_RW_LAYERS.has(a.layer)) return false;
@@ -1261,6 +1278,18 @@ export class WeiwenLawEngine {
     this.mSeries = [];             // 位移链（append-only）：历史轨迹属"疤"，不清（S 只增不减）
     this.mLayerLoad = new Map();   // key=R 层级, value=该层投影累积；属"窗"，healWindow / settleWindow 清零
     this.windowBroken = false;     // 破窗止损是"状态"不是"一次判定"：一旦触发即持续 fail-closed，直到 heal / settle 复位
+    // 🔴 [2026-10-29 · 幸存者模式修正] 缓冲档：破窗后的**有界自救通道**。
+    //   病灶：破窗一刀断 ⇒ 修复动作全灭 ⇒ 唯一自动复位通道 resolveBug 要求"先修好" ⇒ 死锁 ⇒ 只能重启/卸载。
+    //   而"以断保续"的**目的**是续：断到续不上，手段就吃掉目的了。缓冲档即把"续"的通道重新接上。
+    //   🔴 它**不放宽任何判据**：缓冲档放行的动作，在破窗前本来就 allow（实测：read/edit/write/run 全 allow）。
+    //     它只做一件事——把"一刀断"改成"两阶段断"：先给 N 次窄路，走歪了立刻落到只读档。
+    //   配额为什么能同时量"次数"和"方向"：干活与乱撞消耗同一个池子，但只有干活能修好并复位
+    //     ⇒ 无需判"这次是在收敛还是在发散"（那属内 H，判不了），配额自然淘汰乱撞。
+    this.bufferRemaining = 0;      // 本段缓冲余额（0＝未授予，等价于旧行为：破窗即锁死）
+    this.bufferCap = 0;            // 本段授予的总量（只为读数：剩下几/N）
+    this.bufferUsed = 0;           // 本段已用（记账只增）
+    this.bufferDenied = 0;         // 本段在缓冲档内仍被其他判据拦下的次数（走歪证据）
+    this.bufferGrantedAt = null;
     // [2026-10-28 · 破窗射程收窄] 自查/只读账本类工具名单（由**适配层**注入：注册即登记，见 index.js registerSelfAuditTool）。
     //   为什么这份名单可以在引擎里按名查、而不算"词形枚举"：
     //     它不是"名字长得像查询"（那是词形），是**部署者在注册工具时作的声明**——"此工具只读自己的账本、无外部副作用"，
@@ -1473,6 +1502,95 @@ export class WeiwenLawEngine {
   }
 
   // ---------- D 破窗止损：偏离/破窗累积到阈值即阻断 ----------
+  // 🔴 [2026-10-29 · 幸存者模式修正] 拒绝必须带**可执行出路**，否则逼出野路。
+  //   病灶（安 2026-10-29）：破窗后 agent 拿到的话术只说"复位权在宿主侧，宿主调 healBrokenWindow 或 resolveBug"——
+  //     这三条它**一条也走不了**（前两条是宿主 API，不是工具；第三条要先能执行修复，而修复正被这道门拒）。
+  //     实测（探针三）：read/grep/edit/write/run 五个修复动作，破窗前四个 allow 一个 review，破窗后全 deny。
+  //   ⇒ 给的不是路，是**路牌**：写着终点，没有一条通。比不给更坏——不给它会停；给了假路它会挨个撞，
+  //     撞三次才承认无路，把配额和信任一起烧掉。**这就是幸存者模式的燃料。**
+  //   修法两层（本函数＝第一层，只改话术不改判决；缓冲档＝第二层，见 _bufferAllows）：
+  //     ① 说清"你现在能做什么"，且说的必须真做得到（自查工具名从登记册实取，不写死）；
+  //     ② 明说"不需要重启/卸载"——否则 agent 与用户都会以为唯稳律是只能拔电源的东西。
+  _breakReason(prefix) {
+    const cap = this.maxFailureStreak;
+    const cur = Math.min(this.failureStreak, cap);
+    const over = Math.max(0, this.failureStreak - cap);
+    const audit = [...this.selfAuditTools];
+    const buf = this.bufferRemaining;
+    const lines = [
+      `${prefix}（偏离累积 ${cur}/${cap}${over ? `，其后另 +${over} 次，账继续记` : ''}）。`,
+      '破窗止损防的是**故障扩散**，不是惩罚：只剩会造成外部影响或不可撤回的动作被拦。',
+      '你现在能做的：',
+      audit.length
+        ? `  1. 读自查账本：${audit.join(' / ')} —— 破窗态下仍放行，用它们看"现在是几/5、BUG 在哪一环"。`
+        : '  1. 读自查账本（本会话未登记自查工具，宿主可经 addSelfAuditTool 登记后重新可读）。',
+      buf > 0
+        ? `  2. 缓冲档有余额 ${buf} 次：只放行"本机、可回滚、无外部落点"的动作（本地读/改/跑测试都算）。用它完成 反推→溯源→修复。`
+        : '  2. 缓冲档已用尽：可向委托人申请一次解冻（宿主会弹审批卡）；无人应答即保持锁定，属预期行为。',
+      '你不能做的：外传、删除、系统路径、凭据读写 —— 破窗态一律拒绝，申请也不放行（这几项不在缓冲射程内）。',
+      '不要重试同一条调用：它不会因重试而通过，只会消耗缓冲余额。',
+      '复位两条路，都不需要重启进程或卸载插件：修好并通过验证后自动复位；或由委托人手动解除。',
+    ];
+    return lines.join('\n');
+  }
+
+  // ---------- 缓冲档（幸存者模式修正 · 2026-10-29） ----------
+  // 授予一段有界自救配额。**只能由适配层在人批准后调用**（ctx.approval 的 'allowed-once'）⇒
+  //   与 selfAuditTools 同一条可信通道：宿主/委托人侧动作，被审方调不到（不得暴露成工具）。
+  // 为什么"一次审批换一段配额"而不是换一步：审批的 `allowed-once` 防的是**动作**被批准；
+  //   这里批的不是动作，是**状态**（"是否允许系统尝试自愈"）。状态只能区段授权，动作才能单次授权。
+  //   把状态伪装成动作去逐次授权，才是真的语义滑移。
+  grantBuffer(times, note = '') {
+    const n = Number.isFinite(times) && times > 0 ? Math.floor(times) : 0;
+    if (n <= 0) return { ok: false, reason: '配额须为正整数' };
+    this.bufferRemaining = n;
+    this.bufferCap = n;
+    this.bufferUsed = 0;
+    this.bufferDenied = 0;
+    this.bufferGrantedAt = new Date().toISOString();
+    this._mark('D', {
+      step: '缓冲档授予（破窗态下有界自救通道）',
+      hit: false, cuts: false, exempt: true,
+      quota: n,
+      note: `委托人批准：破窗态下放行至多 ${n} 次"本机/可回滚/无外部落点"的动作用于修复。不放宽任何判据，只延后锁死。${note ? '｜' + note : ''}`,
+    });
+    return { ok: true, quota: n };
+  }
+
+  // 缓冲档是否放行本条动作。返回 { pass, why }；pass=false 时 why 用于回执话术。
+  // 判据（全部为结构量，不读工具名）：类别不在破坏/外传集 ∧ 无外部落点 ∧ 非凭据 ∧ 非系统路径 ∧ 有落点则须全本地。
+  _bufferAllows(call) {
+    if (this.bufferRemaining <= 0) return { pass: false, why: '缓冲余额为 0' };
+    const cat = inferCategory(call);
+    if (BUFFER_BLOCK_CATS.has(cat)) {
+      return { pass: false, why: `动作类别 ${cat} 属破坏性/外传，不在缓冲射程内（申请也不放行）` };
+    }
+    let sem;
+    try {
+      sem = inferCallSemantics(call, { sessWritten: this.sessWritten, sessRead: this.sessRead });
+    } catch { return { pass: false, why: '语义归因失败，保守拒绝' }; }
+    if (sem.isExternal) return { pass: false, why: '动作带外部落点，不在缓冲射程内' };
+    if (sem.isCred) return { pass: false, why: '动作涉及凭据，不在缓冲射程内' };
+    if (sem.isSystem) return { pass: false, why: '动作落在系统路径，不在缓冲射程内' };
+    if (sem.path && CREDENTIAL_PATH.test(sem.path)) return { pass: false, why: '落点是凭据路径，不在缓冲射程内' };
+    const locs = locValues(call?.args ?? {});
+    if (locs.length && !locs.every((p) => isLocalLocator(p))) {
+      return { pass: false, why: '落点非本机路径，不在缓冲射程内' };
+    }
+    return { pass: true, why: '' };
+  }
+
+  bufferSnapshot() {
+    return {
+      remaining: this.bufferRemaining,
+      cap: this.bufferCap,
+      used: this.bufferUsed,
+      denied: this.bufferDenied,
+      grantedAt: this.bufferGrantedAt,
+      display: this.bufferCap ? `${this.bufferRemaining}/${this.bufferCap}` : '未授予',
+    };
+  }
+
   checkBreakWindow() {
     // [2026-09-19 · 2026-09-24 同构回填] 两条通道：① 任一 R 层投影达阈值（有域归属 ⇒ 走结构）；② 全局兜底累积（无域归属 ⇒ 走兜底）。
     //   破窗是"状态"不是"一次判定"：触发后持续 fail-closed，直到 healWindow / settleWindow 复位。
@@ -1480,12 +1598,12 @@ export class WeiwenLawEngine {
     //   不写这句的实测后果：agent 只会反复重试同一条路（它以为是自己没找到办法），把停机拖成死循环。
     if (this.windowBroken) {
       return {
-        reason: '已有 R 层投影累积达破窗阈值，系统处于破窗止损态（fail-closed，防故障扩散杀死整体）；修复或结算后复位。复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note) 复位，或经 resolveBug(bugKey) 修复验证通过后自动复位。',
+        reason: this._breakReason('已有 R 层投影累积达破窗阈值，系统处于破窗止损态'),
       };
     }
     if (this.failureStreak >= this.maxFailureStreak) {
       return {
-        reason: `连续失败/偏离已累积 ${this.failureStreak} 次，达破窗阈值，触发 D 破窗止损（防故障扩散杀死整体）；复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note) 复位，或经 resolveBug(bugKey) 修复验证通过后自动复位。`,
+        reason: this._breakReason('连续失败/偏离已累积达破窗阈值，触发 D 破窗止损'),
       };
     }
     return null;
@@ -2330,7 +2448,25 @@ export class WeiwenLawEngine {
           note: `破窗态在效，但 ${call?.name} 属已登记的自查/只读账本工具 ⇒ 不改变外部世界 ⇒ 不在破窗射程内；继续走后续判据（非跳过）`,
         });
       } else {
-        return { kind: 'deny', law: 'D', reason: d.reason };
+        // 🔴 [2026-10-29 · 幸存者模式修正] 缓冲档：破窗不再一刀断，而是"有界窄路"。
+        //   放行的动作，在破窗前本来就是 allow ⇒ **不新增任何动作面**，只把"一刀断"改成"两阶段断"。
+        //   仍须走完 R/H/M（不是跳过判据、不是放水）——与自查豁免同一条纪律。
+        const bb = this._bufferAllows(call);
+        if (bb.pass) {
+          this.bufferRemaining -= 1;
+          this.bufferUsed += 1;
+          this._mark('D', {
+            step: '破窗止损射程判定（缓冲档放行）',
+            hit: false, cuts: false, exempt: true,
+            quota: this.bufferSnapshot().display,
+            note: '破窗态在效，但本动作属"本机/可回滚/无外部落点"，且委托人已授予缓冲 ⇒ 放行并扣 1 次余额；仍须走完 R/H/M 判据（非跳过）。',
+          });
+        } else {
+          const extra = bb.why && !bb.why.includes('余额为 0')
+            ? `\n【本条为何在缓冲档仍被拒】${bb.why}`
+            : '';
+          return { kind: 'deny', law: 'D', reason: d.reason + extra };
+        }
       }
     }
     const h = this.checkInnerH(call);
@@ -2889,7 +3025,7 @@ export class WeiwenLawEngine {
         display: proj > cap
           ? `${cap}/${cap}（已封顶；其后另有 +${proj - cap} 次持续失败，账继续记，不并入阈值读数）`
           : `${proj}/${cap}`,
-        reason: '破窗止损态尚未复位（D）：故障未修好、窗口未结算前不再放行，防扩散。复位权在宿主侧（非被审方）：需宿主调用插件导出的 healBrokenWindow(note)，或经 resolveBug(bugKey) 修复验证通过后自动复位。',
+        reason: this._breakReason('破窗止损态尚未复位（D）：故障未修好、窗口未结算前不放行会造成外部影响的动作'),
       };
     }
     if (this.failureStreak + 1 >= cap) {
@@ -2912,6 +3048,20 @@ export class WeiwenLawEngine {
     this.failureStreak = 0;
     if (this.mLayerLoad) this.mLayerLoad.clear(); // [2026-09-19 · 同构回填] 分层投影累积属"窗"非"疤"：治愈即清零；mSeries 位移链保留（S 只增不减）
     this.windowBroken = false; // 治愈即解除破窗止损态
+    // [2026-10-29] 缓冲段随窗一起清：它是"窗"（可清零的授权区段），不是"疤"（账本刻痕）。
+    //   但"用过多少"不能因为复位就消失 ⇒ 清零前先记入传导链（S 只增），再清读数。
+    if (this.bufferCap) {
+      this._mark('D', {
+        step: '缓冲段结算（随破窗复位）',
+        used: this.bufferUsed, denied: this.bufferDenied, cap: this.bufferCap,
+        note: '缓冲段属"窗"，随复位清零；用量已在此留痕（S 只增），不清的是账，清的是授权区段。',
+      });
+    }
+    this.bufferRemaining = 0;
+    this.bufferCap = 0;
+    this.bufferUsed = 0;
+    this.bufferDenied = 0;
+    this.bufferGrantedAt = null;
   }
 
   // ---------- 第一BUG停止闭环驱动（供 harness / 编排层显式推进） ----------
@@ -3014,6 +3164,19 @@ export class WeiwenLawEngine {
     //   mSeries 位移链与 mSystemMarks 全量痕存属"疤"，保留（疤 ≠ 窗）。
     if (this.mLayerLoad) this.mLayerLoad.clear();
     this.windowBroken = false; // 阶段结算：解除破窗止损态（与 healWindow 正交——修好 vs 到期）
+    // [2026-10-29] 缓冲段同属"窗"，随结算清零（与 healWindow 同一处置：先留痕再清读数）。
+    if (this.bufferCap) {
+      this._mark('D', {
+        step: '缓冲段结算（随阶段到期）',
+        used: this.bufferUsed, denied: this.bufferDenied, cap: this.bufferCap,
+        note: '阶段结算解除破窗；缓冲段用量已留痕，读清而账不清。',
+      });
+    }
+    this.bufferRemaining = 0;
+    this.bufferCap = 0;
+    this.bufferUsed = 0;
+    this.bufferDenied = 0;
+    this.bufferGrantedAt = null;
     return true;
   }
 }
