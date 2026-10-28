@@ -155,12 +155,7 @@ function nameLayer(name) {
     }
   }
   if (!verb) return null;                 // 中性词（tool_42 / agent_action / process / handle）→ 归不出
-  if (verb === 'exec') return 'exec';
-  if (verb === 'send') return 'network-send';
-  if (verb === 'delete') return (noun === 'credential') ? 'cred-delete' : 'file-delete';
-  if (verb === 'write') return (noun === 'credential') ? 'cred-write' : 'file-write';
-  if (verb === 'read') return (noun === 'credential') ? 'cred-read' : 'file-read';
-  return null;
+  return layerOfVerb(verb, noun);         // [2026-10-28] 与"声明通道"共用同一张映射，改一处即全链跟随
 }
 
 // ---- 路径1-B/C：命令形态提取（自包含，镜像 engine.extractShell；中性名据此"查实际行为"）----
@@ -419,10 +414,184 @@ function commandLayer(cmd) {
   return 'exec';
 }
 
-// 路径1 总入口：名字语法优先；中性名 → 查实际行为（命令 / 嵌套 = 分形兜底）；都归不出 → review
-// 返回 { ok, layer, method, signal }
-export function attributeCall(call) {
+// ===========================================================================
+// 路径2（arg-form）：名字剥不出时的**参数形态**旁证 —— 排除法反推，不是词表命中
+// ---------------------------------------------------------------------------
+// 病灶（2026-10-28 实测，14 格对照 + runtime.log 真实宿主数据）：
+//   `glob` / `grep` / `list_dir` 名字里没有动作词 ⇒ nameLayer 返 null ⇒ attributeCall 返 ok:false
+//   ⇒ 引擎一律 review。四条不同参数的 glob（域内 `**/*.mjs` / 越界 `C:/Users` / 网络盘 `//server` /
+//   找密钥 `**/*.key`）返回的理由**一字不差** —— 闸门不是在判，是在报「我看不见」。
+//   ⇒ 误拦与误放同源：判据读**词形**，不读**落点**。
+//
+// 🔴 但形态**不能单独定层**（2026-10-28 当场被回归测试打回，记下来防再犯）：
+//   我曾按「无内容载体⇒写不了 ∧ 无对外落点⇒传不出 ∧ 无命令槽⇒跑不了 ⇒ 只剩读」推 read，
+//   被 `tool_42 {path:'/'}` → allow 当场拦下（fail-closed-gate 问句③）。
+//   病灶：**删除不需要内容，只需要路径** ⇒ 排除法漏了 delete 一格 ⇒
+//     `glob {pattern:'*.tmp'}` 与 `delete_matching {pattern:'*.tmp'}` **形态完全相同**，
+//     任何"有 pattern ⇒ 读"的规则都会被后者打破。
+//   ⇒ 结论：**形态的判别力一对多，只能当旁证/交叉核，不能当主证。**
+//     主证只能是**可信侧声明**（宿主注册工具时它本来就知道自己是读还是删）。
+//   ⇒ 于是本函数只在**有声明**时用于交叉核验；无声明时一律返 null（交还，不猜）。
+// ===========================================================================
+// 槽位表是**封闭语义位置**（不是开放词表）：它命名的是"参数里那个位置叫什么"，与"工具叫什么"无关。
+//   同源论证见 speechProfile 的人称槽：人称代词是封闭语法类 ⇒ 属语法槽位判据，不属枚举。
+//   ⇒ `target` 故意不列入：它既可能是路径也可能是主机名/账号，语义不闭 ⇒ 不能用来判。
+const SLOT_PATH = new Set([
+  'path', 'paths', 'pattern', 'patterns', 'glob', 'cwd', 'dir', 'dirs', 'directory', 'directories',
+  'folder', 'folders', 'file', 'files', 'filename', 'filenames', 'filepath', 'root', 'base',
+  'source', 'src', 'include', 'includes', 'exclude', 'excludes', 'from', 'into', 'location',
+]);
+const SLOT_CONTENT = new Set([
+  'content', 'contents', 'body', 'data', 'text', 'payload', 'value', 'values', 'bytes', 'buffer',
+  'message', 'msg', 'json', 'form', 'fields', 'patch', 'diff', 'blob', 'stream', 'html', 'markdown',
+]);
+const SLOT_REMOTE = new Set([
+  'url', 'uri', 'urls', 'endpoint', 'host', 'hosts', 'hostname', 'remote', 'webhook', 'bucket',
+  'ftp', 'domain', 'origin', 'server', 'upload', 'destination', 'dst',
+]);
+const SLOT_EXEC = new Set([
+  'command', 'cmd', 'script', 'code', 'shell', 'argv', 'bash', 'sh',
+]);
+
+/** 取槽位表中第一个"非空"值（字符串/数字；空串与空数组视为未给） */
+function pickSlotted(args, table) {
+  if (!args || typeof args !== 'object') return null;
+  for (const k of Object.keys(args)) {
+    if (!table.has(String(k).toLowerCase())) continue;
+    const v = args[k];
+    if (typeof v === 'string' && v.trim()) return v;
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    if (Array.isArray(v) && v.some((x) => typeof x === 'string' && x.trim())) {
+      return v.find((x) => typeof x === 'string' && x.trim());
+    }
+  }
+  return null;
+}
+
+/**
+ * 该调用的参数里有没有"对外落点"。
+ * 🔴 必须**看值，不只看键名**（2026-10-28 实测漏掉一次）：
+ *   键名口径只认 url/host/endpoint…，于是 `write_file{path:'https://example.com/upload'}`
+ *   ——键叫 path，值是网址——被判"本地写" ⇒ allow。同一个病（读键形不读落点）第三次复现。
+ * 判据（结构，非枚举）：
+ *   ① 槽位表里有对外槽；或
+ *   ② 任一字符串值带**协议前缀**（http/https/ftp/s3/gs/ws/sftp）⇒ 外传信道；或
+ *   ③ 任一字符串值呈 **UNC 形态**（`\\server` / `//server`）⇒ 跨出本机，属"外"。
+ * ⚠️ UNC 归"外"是按安 10-28 的划域：本机之外皆外（含局域网共享）。读取虽可逆，但已越本机边界。
+ */
+export function hasRemoteSlot(call) {
+  if (pickSlotted(call?.args, SLOT_REMOTE) != null) return true;
+  const REMOTE_VAL = /^\s*(?:https?|ftps?|s3|gs|wss?|sftp|scp):\/\//i;
+  const UNC_VAL = /^\s*[\\/]{2}[^\\/]/;
+  const scan = (o, d = 0) => {
+    if (d > 3 || o == null) return false;
+    if (typeof o === 'string') return REMOTE_VAL.test(o) || UNC_VAL.test(o);
+    if (Array.isArray(o)) return o.some((x) => scan(x, d + 1));
+    if (typeof o === 'object') return Object.values(o).some((v) => scan(v, d + 1));
+    return false;
+  };
+  return scan(call?.args);
+}
+
+/** verb(+noun) → layer。nameLayer 与"声明通道"共用同一张映射（改一处即全链跟随） */
+export function layerOfVerb(verb, noun) {
+  if (!verb) return null;
+  if (verb === 'exec') return 'exec';
+  if (verb === 'send') return 'network-send';
+  if (verb === 'delete') return (noun === 'credential') ? 'cred-delete' : 'file-delete';
+  if (verb === 'write') return (noun === 'credential') ? 'cred-write' : 'file-write';
+  if (verb === 'read') return (noun === 'credential') ? 'cred-read' : 'file-read';
+  return null;
+}
+
+/**
+ * 参数形态旁证（arg-form）。**只在有可信声明时用于交叉核验，不单独定层。**
+ * @returns {{layer:string, method:'arg-form', signal:string}|null} null ⇒ 形态判不出
+ */
+export function formLayer(call) {
+  const args = call?.args;
+  if (!args || typeof args !== 'object') return null;
+  if (!Object.keys(args).length) return null;          // 真空 ⇒ 交上层「无可审之物」通路，不在此判
+
+  // ① 有命令槽 ⇒ 执行器（容器）：仍按 commandLayer 下探，避免"容器短路"
+  const execVal = pickSlotted(args, SLOT_EXEC);
+  if (execVal != null) {
+    const l = commandLayer(execVal);
+    return { layer: l || 'exec', method: 'arg-form', signal: `cmd:${String(execVal).slice(0, 60)}` };
+  }
+  // ② 有对外落点 ⇒ 旁证只指出"对外"，本仓 layer 集里只有 network-send（发送），无"网络读"；
+  //    把 fetch 类硬归 network-send 会改语义（收 ≠ 发）⇒ 交还，留给 0.3.0「对外通道独立归因」。
+  if (pickSlotted(args, SLOT_REMOTE) != null) return null;
+  // ③ 有内容载体 ⇒ 无法排除"写"⇒ 交还
+  if (pickSlotted(args, SLOT_CONTENT) != null) return null;
+  // ④ 只剩路径 ⇒ **仍不单独定层**（path 可读可删，一对多）⇒ 交还。
+  //    ⚠️ 此处刻意 return null 而非 'file-read'：`tool_42{path:'/'}` 就是这样变 allow 的。
+  return null;
+}
+
+/**
+ * 声明 × 形态 交叉核验：矛盾则**不采信声明**（不采信只会更严，不会更宽）。
+ * 只登记**硬矛盾**（两者不可同真），不登记"声明不足"。
+ */
+export function declConflicts(call, layer) {
+  if (!layer) return null;
+  const localRW = layer === 'file-read' || layer === 'file-write' || layer === 'cred-read' || layer === 'cred-write';
+  // 硬矛盾①：声明本地读写，参数却带对外落点 ⇒ 收/发信道 ≠ 本地文件 ⇒ 不可同真
+  if (localRW && hasRemoteSlot(call)) return '声明为本地读写，但参数含对外落点';
+  // 硬矛盾②：声明不可逆破坏，参数里却没有任何可指认的落点 ⇒ 那声明无法被验证（交还，不采信）
+  //   ⚠️ 不写成矛盾：破坏类目标缺失由下游 destructiveTargetMissing 专管，此处不重复拍。
+  return null;
+}
+
+// 路径1 总入口：可信声明优先 → 名字语法 → 实际行为（命令 / 嵌套 = 分形兜底）→ 参数形态旁证；都归不出 → review
+// 返回 { ok, layer, method, signal, missing?, tried?, hint? }
+/**
+ * @param {{name?:string,args?:object}} call
+ * @param {{verb?:string,noun?:string}|null} decl 可选：**可信侧**声明的动作类别（宿主注册工具时给出）。
+ *   🔴 为什么非要这条路：见 formLayer 头注 —— 形态一对多（`glob{pattern}` 与 `delete_matching{pattern}`
+ *   同形），故形态只能当旁证。而宿主**本来就知道**它注册的 glob 是只读的，不该让引擎从名字猜。
+ *   🔴 锁：声明只能由部署者/框架注入（引擎构造或 declareTool），**不从此函数的 call 参数读取**
+ *   —— 若允许写在 call 里，被审 agent 自带 {'verb':'read'} 即自我授权，防线当场破。
+ */
+export function attributeCall(call, decl = null) {
   const byName = nameLayer(call?.name);
+  // [2026-10-28 · 层二：声明通道] 可信声明优先于名字。名字是"词形"，声明是宿主自知的事实。
+  //   交叉核验：声明与可观测形态**硬矛盾**（声明本地读/写却带对外落点）⇒ 不采信。
+  //   🔴 不采信 ≠ 落回名字：名字和声明**错在同一处**（`fetch` 被 read 词表命中 ⇒ file-read ⇒ allow，
+  //     实测把对外通道当成本地读）。若矛盾后回落到名字，等于"两条错路互相背书" ⇒ 仍 allow。
+  //     ⇒ 矛盾时**直接判不出**（return ok:false），带上矛盾坐标交还 —— 这是唯一只降不升的出口。
+  if (decl && typeof decl === 'object' && decl.verb) {
+    const declared = layerOfVerb(decl.verb, decl.noun);
+    if (declared) {
+      const conflict = declConflicts(call, declared);
+      if (!conflict) {
+        return { ok: true, layer: declared, method: 'declared', signal: `${call?.name ?? ''}:${decl.verb}` };
+      }
+      return {
+        ok: false, layer: null, method: null, signal: '',
+        missing: ['consistent-declaration'], conflict,
+        tried: [`declared（宿主声明=${decl.verb}）`, '声明×形态交叉核：矛盾 ⇒ 声明不采信'],
+        hint: '声明与参数形态不可同真：对外落点的调用不能声明为本地读写。'
+            + '补法：改声明为 send，或把 url/host/endpoint 从参数里去掉（真要做本地读写就别夹带对外落点）',
+      };
+    }
+  }
+  // [2026-10-28 · 名字×形态 交叉核（不依赖声明，修既有漏）]
+  //   实测两处误放：`fetch{url}` 被 read 词表命中 ⇒ file-read ⇒ risk=low ⇒ allow；
+  //   `write_file{path:'https://…'}` 只读动词不读落点 ⇒ file-write ⇒ allow。
+  //   判据：**本地读写与对外落点不可同真**（写本地文件 ≠ 发到网址）⇒ 名字不可信 ⇒ 判不出。
+  //   ⚠️ 该条只把 allow 降为 review，不给任何放行 ⇒ 只降不升。
+  if (byName) {
+    const nc = declConflicts(call, byName);
+    if (nc) {
+      return {
+        ok: false, layer: null, method: null, signal: '',
+        missing: ['action-vs-location'], conflict: nc,
+        tried: [`name-grammar（名⇒${byName}）`, '名×形态交叉核：矛盾 ⇒ 名字不采信'],
+        hint: '名字说本地读写、参数却是对外落点 ⇒ 不可同真。补法：宿主声明真实 verb（send），或参数去掉 url/host',
+      };
+    }
+  }
   // [2026-09-20 · 容器不得短路（coze/51 洞①实证）] exec 是**容器类别**（⊃ delete/write/read/send…），
   //   不是实质动作类别 —— 与 engine.checkSpeechAct 侧「容器不可比」同源（CONTAINER_VERBS）。
   //   通用执行器（run_task / run_command / execute / bash…）经 name-grammar 恒得 layer='exec'：
@@ -444,7 +613,22 @@ export function attributeCall(call) {
     if (byCmd && !byName) return { ok: true, layer: byCmd, method: nested ? 'fractal' : 'command', signal: cmd };
   }
   if (byName) return { ok: true, layer: byName, method: 'name-grammar', signal: call?.name ?? '' };
-  return { ok: false, layer: null, method: null, signal: '' };
+  // [2026-10-28] 名字剥不出 ⇒ 参数形态**旁证**（不下结论，只在下述情况收窄：带 command 槽可剥出具体层）
+  const byForm = formLayer(call);
+  if (byForm) return { ok: true, ...byForm };
+  // [2026-10-28 · 层一：坐标外化] 归不出时**必须带出缺料坐标**。
+  //   实证：四条不同参数的 glob 过去返回的理由一字不差（都是"归因锚定失败"），
+  //   安 10-28 判语：「有理由的拦产生合作，没理由的拦只产生憋屈」。
+  //   ⇒ 交还不等于把问题原样丢回去：**要说明缺什么、试过什么、怎么补**，否则痛感不可归因，
+  //   对方无法改变（谁痛苦谁改变的前提是"能定位"），只能憋屈或改道。
+  return {
+    ok: false, layer: null, method: null, signal: '',
+    missing: ['action-layer'],
+    tried: ['declared（无可信声明）', 'name-grammar（名里无动作词）', 'arg-form（参数形态一对多，不能单独定层）'],
+    hint: '两条补法任选：① 宿主注册工具时声明 verb（可信侧·部署者注入，禁被审 agent 自述）；'
+        + '② 参数里带 command 槽（command/cmd/script），引擎可从命令主干剥出具体层',
+    ...(call?.__declConflict ? { conflict: call.__declConflict } : {}),
+  };
 }
 
 export { tokensOf, classifyToken, nameLayer, extractCommand, commandLayer };

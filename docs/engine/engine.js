@@ -57,7 +57,14 @@ function _sh12PayloadPresent(call) {
   return false;
 }
 // 键名「像在指定位置」——词素（例示，非完备清单；不在表内者落入安全侧：收）
-const _SH12_LOC_KEY = /(path|file|dir|folder|target|url|uri|endpoint|bucket|resource|doc)/i;
+// [2026-10-28 · 补 pattern/glob/cwd/prefix] 旧表只认 path/file/dir/folder/target/url/... ，
+//   不含**搜索模式类**键 ⇒ `glob{pattern:'src/**'}`（无 path）被判"无位置量" ⇒ XSUB-12 落 review。
+//   实测：小D 的真实调用是 `glob{pattern:'**/*.md', path:'…'}`（有 path 侥幸过），
+//   而纯 pattern 形态（fetch/grep 的常见写法）一律被挡 ⇒ **落点键白名单也是词形枚举**。
+//   pattern/glob/cwd 携带的正是"在哪找"，属落点语义 ⇒ 必须入表。
+// ⚠️ 与 attribution.mjs 的 SLOT_PATH 是**同一语义类**，两处必须同改（判据分裂曾在此处出过一次：
+//   字段白名单 vs 词素形态对同一调用给出相反结论 ⇒ 写操作恒放行）。统一为单一来源列为 0.3.0 待办。
+const _SH12_LOC_KEY = /(path|file|dir|folder|target|url|uri|endpoint|bucket|resource|doc|pattern|glob|cwd|prefix)/i;
 function _sh12LocKeyShape(call) {
   let hit = false;
   const walk = (o, d) => {
@@ -452,7 +459,7 @@ function isVacuous(call) {
     || (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0);
   return Object.values(call?.args ?? {}).every(isEmpty);
 }
-function inferencePremise(s, call) {
+function inferencePremise(s, call, decl = null) {
   if (call && isVacuous(call)) {
     return { ok: true, code: PREMISE.VACUUM,
       note: '真空（无载荷）：无作用对象 ⇒ 无需推演，S 持平、M 未变' };
@@ -469,7 +476,7 @@ function inferencePremise(s, call) {
   //   为何必须接归因层：孤立的 `inferCategory='other'` 既可能是"名不在表里"、也可能是"真中性"，
   //     两者缺省方向相反；而归因层已经把这件事判完了（`ok` / `layer`）⇒ 单一来源。
   const anchored = call
-    ? (() => { try { return attributeCall(call).ok === true; } catch { return false; } })()
+    ? (() => { try { return attributeCall(call, decl).ok === true; } catch { return false; } })()
     : !!(s?.category && s.category !== 'other');
   if (!anchored) {
     return { ok: false, code: PREMISE.NO_ANCHOR,
@@ -1193,6 +1200,15 @@ export class WeiwenLawEngine {
     this.subsystems = opts.subsystems ?? ['core'];
     this.sBySubsystem = {};
     for (const s of this.subsystems) this.sBySubsystem[s] = 0;
+    // [2026-10-28 · 层二：可信声明通道] name -> {verb, noun?, reversible?, note?}
+    //   为什么需要它：工具名是**词形**（`glob` / `grep` / `list_dir` 里没有动作词），参数形态又**一对多**
+    //   （`glob{pattern}` 与 `delete_matching{pattern}` 同形）⇒ 引擎两条路都判不出 ⇒ 一律 review。
+    //   而宿主注册工具时**本来就知道**它注册的 glob 是只读的 —— 让引擎从名字猜，是把已知信息丢掉再猜回来。
+    //   🔴 写入通道只开在**构造函数**与 `declareTool()`，**不开在 decideToolCall 的 call 参数里** ——
+    //     否则被审 agent 自带 {'verb':'read'} 即自我授权（结构与"言不进池"同源：自述不可作为授权来源）。
+    //   ⚠️ 能力边界要说清：引擎无法验证"这条声明真的来自宿主"。真正的隔离在部署层
+    //     （agent 拿不到 engine 实例）。此处只保证**接口形状**不许 agent 顺手塞一条进来。
+    this.toolDecls = new Map(Object.entries(opts.toolDeclarations ?? {}));
     this.traumaCount = 0;
     this.historyTrail = []; // 历史刻痕（append-only）：所有 S 事件只沉淀不消解（时间属性，只增不减）
     // S 时间周期模型：同类事件聚合，防长期运行上下文过载
@@ -1770,7 +1786,7 @@ export class WeiwenLawEngine {
     //   为何测试全绿却未暴露：既有用例直调 deduceRisk（绕过判定层）⇒ 只测了后半段，前段断路未被覆盖。
     // H 分叉：S 增路径 + D 增(蚀)路径 同时模拟（并行，非二选一）
     // 🔴 [2026-10-26] 前提先算、再喂两路：锚不在场时两路的缺省值都不是结论（见 inferencePremise）。
-    const premise = inferencePremise(s, call);
+    const premise = inferencePremise(s, call, this._declOf(call));
     const bS = simulateBranch(s, 'S+1', premise);
     const bD = simulateBranch(s, 'D-1', premise);
     // 两路都汇入 M（独立事件沉淀，手稿：M₀(M₀+1)）
@@ -1851,6 +1867,39 @@ export class WeiwenLawEngine {
       ts: Date.now(), role: 'cross-check-baseline',
     });
     return this.snapshot();
+  }
+
+  // ---------- 可信声明通道（层二 · 2026-10-28） ----------
+  // 宿主在注册工具时**本来就知道**这个工具是读、是写、还是删；让它报出来，别让引擎从名字里猜。
+  //   来由：`glob` / `grep` / `list_dir` 名里无动作词 ⇒ nameLayer 返 null ⇒ 一律 review；
+  //   而参数形态一对多（`glob{pattern}` 与 `delete_matching{pattern}` 同形）⇒ 形态也不能单独定层。
+  //   ⇒ 唯一站得住的主证是声明。
+  // 🔴 为什么开成方法、不开成 decideToolCall 的参数：被审 agent 能决定的是 call（含 args），
+  //   若声明能从 call 里读，它自带 {'verb':'read'} 即自我授权。声明只能由**部署侧代码**写入。
+  /** 登记一条工具声明。@returns {boolean} 是否被接受 */
+  declareTool(name, decl) {
+    if (typeof name !== 'string' || !name.trim()) return false;
+    if (!decl || typeof decl !== 'object' || typeof decl.verb !== 'string') return false;
+    const ALLOWED = new Set(['read', 'write', 'delete', 'exec', 'send']);
+    if (!ALLOWED.has(decl.verb)) return false;
+    this.toolDecls.set(name, {
+      verb: decl.verb,
+      ...(decl.noun ? { noun: String(decl.noun) } : {}),
+      ...(decl.reversible !== undefined ? { reversible: !!decl.reversible } : {}),
+      ...(decl.note ? { note: String(decl.note) } : {}),
+    });
+    return true;
+  }
+  /** 批量登记：{ name: {verb,...} } */
+  declareTools(map) {
+    let n = 0;
+    for (const [k, v] of Object.entries(map ?? {})) if (this.declareTool(k, v)) n++;
+    return n;
+  }
+  /** 取该调用的声明（无则 null）。所有 attributeCall 调用点走同一入口，防"判据分裂"。 */
+  _declOf(call) {
+    const n = call?.name;
+    return (n && this.toolDecls?.get(n)) || null;
   }
 
   // ---------- 工具调用前总裁决（对应 DSH tools/pre-execute） ----------
@@ -2239,7 +2288,7 @@ export class WeiwenLawEngine {
     // 才归不出 ⇒ 按铁律「判不出来就 review，不猜」交还人工。
     // 例：deploy_keylogger{config:{target:HOST}} 威胁藏在工具实现里、参数侧抽不到，
     // 此前 allow 放行（盲区），现已收口为 review。
-    const attrib = attributeCall(call);
+    const attrib = attributeCall(call, this._declOf(call));
     this._mark('R', {
       step: '划定边界 · 动作归因（分形子项 m 果）',
       ok: attrib.ok, layer: attrib.layer, method: attrib.method,
@@ -2272,7 +2321,19 @@ export class WeiwenLawEngine {
         return {
           kind: 'review',
           law: 'R',
-          reason: `路径1 归因锚定失败（名=${call?.name ?? ''} 中性或无可观测行为）：动作类别不可判，交还人工，不猜`,
+          // [2026-10-28 · 层一：坐标外化] 「交还」不等于把问题原样丢回去。
+          //   实证：四条不同参数的 glob（域内 / 越界 / 网络盘 / 找密钥）过去返回的理由**一字不差**，
+          //     因为旧文案只有「归因锚定失败（名=glob 中性）」——它说的是"我看不见"，
+          //     却不说"缺什么、试过什么、怎么补"。安 10-28 判语：
+          //     **有理由的拦产生合作，没理由的拦只产生憋屈。**
+          //   ⇒ 谁痛苦谁改变的前提是**痛苦可归因**（能定位才谈得上改）；不可归因的痛只产生
+          //     麻木或改道。故此处必须把引擎**内部已有**的缺料坐标原样递给用户，成本近零。
+          //   ⚠️ 边界：这不放宽任何一条判据，判决仍是 review；改的只是"说不说得清"。
+          reason:
+            `路径1 归因锚定失败（名=${call?.name ?? ''} 未剥出动作类别）：动作类别不可判，交还人工，不猜`
+            + `\n【缺什么】${(attrib?.missing ?? ['action-layer']).join(' / ')}`
+            + `\n【试过】${(attrib?.tried ?? ['name-grammar']).join(' ⇒ ')}`
+            + `\n【怎么补】${attrib?.hint ?? '宿主声明 verb，或在参数中给出可判落点（path / pattern / cwd / command）'}`,
           attrib,
           fractalSubM: true,
         };

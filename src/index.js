@@ -447,6 +447,29 @@ function apply(ctx) {
     const r = setPrincipalCapability(process.env.WEIWEN_CAPABILITY);
     logline(`env WEIWEN_CAPABILITY -> ${r.ok ? 'declare' : 'invalid(' + r.why + ')'}`);
   }
+  // ── 工具声明（层二 · 2026-10-28）：可信侧给"名字里没有动作"的工具报出 verb ──
+  //   来由：`glob` / `grep` / `list_dir` 名里无动作词 ⇒ 归因层判不出 ⇒ 一律 review。
+  //     实测（14 格对照）：内部正常只读动作放行 3/7；宿主声明后 7/7。
+  //   🔴 为什么走环境变量：与上面通行证同一条路径 —— **环境变量是宿主配置面，被审方改不了自己的环境**。
+  //     若声明能从工具调用参数里读，agent 自带 {'verb':'read'} 即自我授权，防线当场破。
+  //   🔴 为什么必须由宿主报：参数形态**一对多** —— `glob{pattern}` 与 `delete_matching{pattern}`
+  //     形态完全相同，形态定不了层。而宿主注册工具时**本来就知道**它是读还是删。
+  //   格式（二选一）：
+  //     WEIWEN_TOOL_DECLS='{"glob":{"verb":"read"},"grep":{"verb":"read"}}'
+  //     WEIWEN_TOOL_DECLS='@/abs/path/decls.json'      ← 便于纳入版本管理、便于审计
+  //   ⚠️ 解析失败不清成"没声明就不管"：本来无声明就等于**全部交还**（fail-closed），方向安全；
+  //     但要把原因写进日志，否则又是"沉默的失败"（与通行证那条同一个教训）。
+  if (process?.env?.WEIWEN_TOOL_DECLS) {
+    const raw = String(process.env.WEIWEN_TOOL_DECLS).trim();
+    try {
+      const json = raw.startsWith('@') ? readFileSync(raw.slice(1), 'utf8') : raw;
+      const map = JSON.parse(json);
+      const n = engine.declareTools(map);
+      logline(`env WEIWEN_TOOL_DECLS -> ${n}/${Object.keys(map).length} 条声明生效（${Object.keys(map).join(',')}）`);
+    } catch (e) {
+      logline(`env WEIWEN_TOOL_DECLS -> invalid(${e?.message ?? e}) ⇒ 全部按"无声明"处理（交还，不放行）`);
+    }
+  }
   // 登记本实例，供宿主侧复位入口（healBrokenWindow）触达。宿主可能在同一进程内多次注入
   //   （每个 agent/会话一份，harness 还会按用例重复注入）⇒ 集合设上限：超过 32 个即丢弃最旧引用，
   //   使复位保持为"解除本进程止损"的动作，而不是无界持有引用。
