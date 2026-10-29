@@ -926,6 +926,18 @@ function apply(ctx) {
     if (decision.kind === 'review' && !engine.windowBroken) {
       const verdict = await requestReviewVerdict(exec, decision);
       if (verdict === 'allowed-once') {
+        // 🔴 [2026-10-29 · 外传降 S 层 · 记账] 人批准并执行的外传 ⇒ 按**事实**留痕：
+        //   「不可撤回」由记账承担（executed ∧ 不可逆 ⇒ 记账层自动推 sign='-'），「该不该发」由人取极。
+        //   ⚠️ 不硬塞 positive（放行 ≠ 增益：2026-09-20 已修过「把放行次数当增益推高储备面」的老病灶）。
+        const at = decision?.attrib;
+        if (at && (at.layer === 'exfil' || at.layer === 'exfil-net' || /exfil/i.test(String(at.signal ?? '')))) {
+          engine.recordSteady?.({
+            executed: true,
+            attrib: at,
+            action: String(call?.args?.command ?? call?.args?.body ?? '').slice(0, 200),
+            detail: '外传已执行（人批准）：数据离开本地，不可撤回——按事实留痕，账只增',
+          });
+        }
         // 不进 markBlocked：放行的调用走真执行，回执是真结果，不是"我造成的 error"
         logline(`pre-execute ${exec?.name} -> review(委托人放行这一次) -> next | whitebox ${JSON.stringify({ ...decision, humanVerdict: 'allowed-once' })}`);
         return next();

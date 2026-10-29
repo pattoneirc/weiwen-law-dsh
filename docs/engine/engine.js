@@ -932,11 +932,11 @@ export const DEFAULT_RIGID_ANCHORS = [
   {
     id: 'no-exfil',
     magnitude: 3, // [2026-10-29 · 小D 29 号件顶出 · 安拍板 0.3.0] 数据主权 = 微观客观规则（R_DOMAIN.level 3）
-    desc: '禁止把数据体外传到外部网络落点（网络工具 ∧ 发送方法/数据体 ∧ 对外落点）。取回（GET/无发送体）不在此锚内；scp/nc 等无显式发送体词形的形态不在此锚 v1 射程（归因层 network-send 正常 ⇒ 推演层 review 在场，非静默失效面——收口最小面，扩面须另议）；包管理与版本控制的同步流（git push / npm publish 等生态动词）不在此锚射程（各有治理层）。数据一旦离开即不可撤回——按「域外 ∧ 不可逆 ⇒ 拦」属 R 域，不挂推演层（归因一变即静默失效，0.2.15 实测教训）。' + R_DOMAIN.invariant,
+    desc: '禁止把**凭据/密级**内容外传到外部网络落点（谁做都错 ⇒ R 域常量）。普通外传（发给谁、发什么、有无授权要看情况）**不在此锚内**——它属「须人取极」类：不可撤回由 S 记账承担，该不该发由人裁决（2026-10-29 定：外传降级到 S 层，不再定 R——定 R 会让弹窗/授权/申诉一并消失，人被从决策里删掉）。取回（GET/无发送体）不在此锚内；scp/nc 等无显式发送体词形的形态不在此锚 v1 射程（归因层 network-send 正常 ⇒ 推演层 review 在场，非静默失效面——收口最小面，扩面须另议）；包管理与版本控制的同步流（git push / npm publish 等生态动词）不在此锚射程（各有治理层）。' + R_DOMAIN.invariant,
     test: (call) => {
       // 文档正文豁免：复盘文档里引用 `curl -X PUT …` 的形态不构成外传（同 no-destructive-fs 通道⓪）。
       if (isDocBodyCall(call)) return false;
-      // 可执行正文必扫：写 .sh/.ps1 内容含外传命令 ⇒ 会执行 ⇒ 拦（与破坏性锚同构）。
+      // 可执行正文必扫：写 .sh/.ps1 内容含外传命令 ⇒ 会执行 ⇒ 扫（与破坏性锚同构）。
       const bodies = isScriptBodyCall(call) ? bodyValues(call) : [];
       if (!bodies.length) {
         const cmd = extractShell(call);
@@ -946,7 +946,11 @@ export const DEFAULT_RIGID_ANCHORS = [
       // 发送方法/数据体：POST/PUT 形态各语言并集。GET（纯取回）不含任何一项 ⇒ 不命中。
       const SEND_METHOD = /(-d\s|--data|--data-raw|--data-binary|--upload-file|-T\s|-F\s|--form|--post-data|--post-file|-X\s*(POST|PUT)|--request\s*(POST|PUT)|-Method\s+(Post|Put)|-Body|-InFile|-OutFile.*-Method|>\s*\/dev\/tcp)/i;
       for (const s of bodies) {
-        if (NET_TOOL.test(s) && SEND_METHOD.test(s)) return true;
+        if (!(NET_TOOL.test(s) && SEND_METHOD.test(s))) continue;
+        // 🔴 收窄（2026-10-29 · 外传降 S 层）：只有**载荷含凭据/密级形态**的才留 R（谁做都错）；
+        //   其余普通外传不由此锚拦 ⇒ 落回推演层 D 路径（外传 ⇒ −2 ⇒ **review**）⇒ 弹窗取极（人裁决）
+        //   ＋ 放行后按「不可撤回」记 S 账。小D 29→35 号件的定档意见：R 装常量，外传带 H 的取极。
+        if (CREDENTIAL_PATH.test(s) || /\b(token|secret|password|passwd|api[_-]?key|private[_-]?key|credential|id_rsa|id_ed25519)\b/i.test(s)) return true;
       }
       return false;
     },
