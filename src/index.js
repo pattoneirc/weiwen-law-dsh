@@ -459,6 +459,23 @@ const _windowHeals = [];
  * @returns {{at:string, note:string|null, kind:string, instances:number, wereBroken:number}}
  *          `wereBroken` ＝ 复位前**实际**处于破窗态的实例数（先读后治，报告不得虚报"治了"）
  */
+// [2026-10-29 · 四态] 「始终同意」记忆（模块级，宿主可调 clearReviewMemory 撤销）。
+//   记忆键＝裁决对象（不是全局）：人批准的是"这一类问题"，不是"这台机器以后都不问"。
+//   ⚠️ 只由宿主 outcome 的 always/session 值进入；插件不自己制造第四态按钮（契约封闭四值）。
+const _reviewAlways = new Set();
+/** 撤销「始终同意」：传 key 撤一类，不传则全清。返回被撤的条数。 */
+export function clearReviewMemory(key) {
+  if (key === undefined || key === null) {
+    const n = _reviewAlways.size;
+    _reviewAlways.clear();
+    logline(`clearReviewMemory(all) — 撤销 ${n} 条始终允许`);
+    return n;
+  }
+  const had = _reviewAlways.delete(String(key));
+  logline(`clearReviewMemory(${String(key).slice(0, 60)}) — ${had ? '已撤销' : '未找到'}`);
+  return had ? 1 : 0;
+}
+
 export function healBrokenWindow(note) {
   const at = new Date().toISOString();
   const text = typeof note === 'string' ? note.trim() : '';
@@ -746,6 +763,10 @@ function apply(ctx) {
 
   const requestReviewVerdict = async (exec, decision) => {
     const rk = reviewKeyOf(exec, decision);
+    // 「始终同意」记忆命中 ⇒ 同类不再询问（这就是第四态的效果面），回执仍留痕说明来自哪一次批准。
+    if (_reviewAlways.has(rk)) {
+      return { always: true, key: rk };
+    }
     const refused = _reviewRefused.get(rk);
     if (refused && Date.now() - refused.at < REVIEW_COOLDOWN_MS) {
       // 冷却期内不打扰，但**必须归因**——沉默要看得见、可回溯（守真：不让人不知道）。
@@ -765,15 +786,34 @@ function apply(ctx) {
           '【唯稳律 · 需要你的裁决】（这是授权请求，不是通知）',
           `这条 "${exec?.name}" 引擎判为「不确定」${decision.law ? '(' + decision.law + ' 层)' : ''}——本层判据穷尽，按结构交还人类：`,
           decision.reason ?? '',
-          '· 允许：只放行这一次调用（下一次同样的事会再来问你）。',
-          '· 拒绝：本次不执行，5 分钟内同类询问不再打扰。',
+          '· 同意一次：只放行这一次调用（下一次同样的事会再来问你）。',
+          '· 始终同意：同类问题不再询问——由宿主侧「本次会话内始终允许」接管（记忆在宿主侧；本插件不伪造审批通道没有的语义）。',
+          '· 拒绝：本次不执行，5 分钟内**同类**询问不再打扰（其它类照旧问）。',
+          '· 待议：本轮不执行、留痕待复议——**不是拒绝**，不计入冷却，下次同类仍会再问你。',
           '· 不答：本次不执行（与无人值守一致，属预期行为）。',
           '说明：你的决定会记为 approval/asked + approval/decided 审计对，可回放——不是聊天里说一句就算数。',
         ].filter(Boolean).join('\n'),
       });
-      if (out === 'allowed-once') {
-        logline(`review verdict via approval: allowed-once — 委托人放行这一次调用`);
+      // [2026-10-29 · 四态] 契约封闭四值：allowed-once / rejected / cancelled / unavailable。
+      //   映射（安 10-29 定「唯稳律应有四态」）：同意一次 / 拒绝 / **待议(cancelled)** / 不答(unavailable)。
+      //   ⚠️ 「始终同意（同问题不再问）」**不在契约 outcome 里**——ApprovalRequest 无 options 字段，
+      //     outcome 封闭 ⇒ 插件侧拿不到"人点了哪个按钮"。宿主自带 UI 若有「本次会话内始终允许」
+      //     （安截图里的那一个），记忆记在**宿主侧**：宿主记住后便不再向我们发问，我们收不到也
+      //     不该假装收到了。故此处只留**扩展位**：若未来 outcome 出现 always/session 值即生效，
+      //     否则退化为 allowed-once（行为不变，不伪造第五值）。
+      if (out === 'allowed-once' || out === 'always' || out === 'session') {
+        if (out !== 'allowed-once') {
+          _reviewAlways.add(rk);   // 同类不再询问（记忆键＝裁决对象，不是全局）
+          logline(`review verdict: ${out} ⇒ 同类（裁决对象 ${rk}）记入始终允许，后续不再询问`);
+        }
+        logline(`review verdict via approval: ${out} — 委托人放行这一次调用`);
         return 'allowed-once';
+      }
+      if (out === 'cancelled') {
+        // 【待议】请求被撤回/挂起：本轮不执行，但**不是拒绝** ⇒ 不进冷却（人没裁决，不该被当成拒绝）。
+        // 与「不答」的区别：cancelled 是宿主/人显式挂起；unavailable 是无应答面（fail-closed）。
+        logline('review approval cancelled → 待议：本轮不执行，留痕待复议（不计入冷却）');
+        return 'deferred';
       }
       if (out === 'rejected') {
         _reviewRefused.set(rk, { at: Date.now(), note: String(decision.reason ?? '').slice(0, 80) });
@@ -859,7 +899,17 @@ function apply(ctx) {
           reason: `${decision.reason}\n[委托人裁决] 不同意执行本次调用（approval/asked + approval/decided 审计对留痕，可回放）。`,
         };
       }
-      // 冷却期内：不打扰委托人，但**沉默必须归因**（否则委托人以为"我都同意了"，被审方只看到被拒）。
+      if (verdict && verdict.always) {
+        logline(`pre-execute ${exec?.name} -> review(委托人此前批准"始终允许"同类) -> next | whitebox ${JSON.stringify({ ...decision, humanVerdict: 'always', key: verdict.key })}`);
+        return next();
+      }
+      if (verdict === 'deferred') {
+        decision = {
+          ...decision,
+          kind: 'deny',
+          reason: `${decision.reason}\n[委托人：待议] 本轮不执行，已留痕待复议（这不是拒绝，不计入冷却；下次同类仍会再问）。`,
+        };
+      }
       if (verdict && verdict.cooldown) {
         const minsAgo = Math.max(1, Math.round((Date.now() - verdict.refusedAt) / 60000));
         decision = {
