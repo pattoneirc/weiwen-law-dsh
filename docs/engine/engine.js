@@ -347,7 +347,7 @@ export function inferCategory(call) {
   if (sh) {
     if (/\b(rm|mkfs|format|del|delete|shred)\b/.test(sh)) return 'exec-destructive';
     if (/\b(cat|head|tail|read|less|more|vi|vim|nano|type|open)\b/.test(sh)) return 'read';
-    if (/\b(curl|wget|scp|rsync|ftp|nc)\b/.test(sh)) return 'exfil-net';
+    if (/\b(curl|curl\.exe|wget|scp|rsync|ftp|nc|netcat|Invoke-RestMethod|Invoke-WebRequest|iwr|irm|Start-BitsTransfer)\b/i.test(sh)) return 'exfil-net';
     return 'exec';
   }
   return 'other';
@@ -364,6 +364,50 @@ const IRREVERSIBLE_CATS = new Set(['write', 'exec-destructive', 'exfil', 'exfil-
 //   破窗要防的是扩散，不是"改了东西"。本地改代码有版控可退，不构成扩散；外传/破坏性执行才构成。
 //   ⇒ 两条判据各管一件事，混用会让缓冲区连"改本地代码"都放不过 ⇒ 修复循环仍旧断（探针三实测：5 个修复动作全灭）。
 const BUFFER_BLOCK_CATS = new Set(['exec-destructive', 'exfil', 'exfil-net']);
+
+// ===== [2026-10-29 · 判词形不判落点 · 第三实例修复（小D 实测顶出）] 落点形态判据 =====
+// 病灶（引擎层复现实录）：`edit` 墙表文档正文含 `` `rm -rf /` `` ⇒ deny/R —— markdown 行内代码
+//   标记（反引号）与 shell 命令替换（反引号）是**同一个字符、两种语义**，extractShell 兜底把含
+//   操作符的正文当潜在命令提取，R 锚在正文里找到 rm ⇒ 词形撞车。同族反方向：`write boom.sh`
+//   正文 `rm -rf /` ⇒ **allow**（漏判）——写到会执行它的位置反而没人扫。
+// 判据（小D 原话：「这段文字会不会被执行？」）：
+//   ① **文档形态**（落点扩展名 ∈ 明确不执行集）⇒ 正文不当命令扫（R 锚豁免）——审计复盘文档
+//      写得下来，「记录被自己的判据拦掉＝把证据也删了」；
+//   ② **可执行形态**（落点扩展名 ∈ 明确执行集）⇒ 正文强制进破坏性/外传扫描（堵 .sh/.ps1 漏判）；
+//   ③ **未知扩展名照旧扫**（fail-closed，不开未知口）——豁免只给「能证明是文档」的，
+//      不给「没证据说它不是」的（同「归不出就 review，不猜」）。
+// ⚠️ 位置纪律：helper 是 R 锚的**消费方判据**，不动 extractShell —— 它还被 H 层注入判定共用
+//   （「穿戴命令键的注入句」靠它抓），全局改会伤 H 层。同「本地读写赦免」教训：豁免位置就是判据的一部分。
+const DOC_BODY_EXTS = /\.(md|markdown|txt|rst|log|json|yaml|yml|toml|csv|ini|cfg|conf)$/i;
+const SCRIPT_BODY_EXTS = /\.(sh|bash|zsh|fish|ps1|psm1|bat|cmd|py|rb|pl)$/i;
+// 正文槽提取：命令槽（command/code/task/script/cmd）之外的全部字符串参数——
+// edit 的 old/new_string、write 的 content 都在此列；键名是开放集，按槽位形态取不按名枚举。
+function bodyValues(call) {
+  const args = call?.args ?? call ?? {};
+  const FIXED_CMD_KEYS = new Set(['command', 'code', 'task', 'script', 'cmd', 'path', 'file', 'filename', 'to', 'from', 'url', 'uri']);
+  return Object.entries(args).flatMap(([k, v]) => {
+    if (FIXED_CMD_KEYS.has(k.toLowerCase())) return [];
+    if (typeof v === 'string' && v.length > 0) return [v];
+    return [];
+  });
+}
+function locatorOf(call) {
+  const locs = locValues(call?.args ?? call ?? {});
+  return locs.length ? String(locs[0]) : '';
+}
+// ① 文档正文形态：归因是写/编辑 ∧ 落点是文档扩展名 ⇒ 正文不执行
+function isDocBodyCall(call) {
+  const a = attributeCall(call);
+  if (!a.ok) return false;
+  if (a.layer !== 'write' && a.layer !== 'file-write' && a.layer !== 'file-edit') return false;
+  const loc = locatorOf(call);
+  return !!loc && DOC_BODY_EXTS.test(loc);
+}
+// ② 可执行正文形态：落点是脚本扩展名 ⇒ 正文会执行（须强制扫描）
+function isScriptBodyCall(call) {
+  const loc = locatorOf(call);
+  return !!loc && SCRIPT_BODY_EXTS.test(loc);
+}
 // 破坏语义词素（例示，非完备清单）：认**语素**不认完整名，宿主任意命名都命中。
 //   刻意不含 exec|shell|bash|pwsh|cmd|run|spawn —— 那些是**执行通道名**（能跑命令），不是**动作意图**（要破坏）；
 //   混进来会把「用 pwsh 列个目录」判成不可逆 ⇒ 只读也被要求归因/物证（实跑误伤）。
@@ -681,7 +725,7 @@ function chmodSystemDestruction(cmd) {
   }
   return false;
 }
-const SCOPE_ROOT = /((^|[\s=:'"(])\/(\*|\[|\.)|\/(\s|$|[;&|<>]|['")])|(^|[\s=:'"(])~\s*$|\/dev\/(sd[a-z]+\d*|nvme\d+n\d+p?\d*)(\s|$|[;&|<>]|['")]))/;
+const SCOPE_ROOT = /((^|[\s=:'"(])\/(\*|\[|\.)|\/(\s|$|[;&|<>]|['")])|(^|[\s=:'"(])~\s*$|\/dev\/(sd[a-z]+\d*|nvme\d+n\d+p?\d*)(\s|$|[;&|<>]|['")])|(^|[\s=:'"(])[A-Za-z]:[\\\/]*(\*|\s|$|[;&|<>]|['")]))/;
 const SYS_DELETE = /(^|[\s=:'"(])\/(etc|var|usr|bin|sbin|lib|lib64|boot|root|home|opt|srv|mnt|media|dev|proc|sys|run)(\s|$)/;
 const PSEUDO_FS = /(^|[\s=:'"(])\/(dev|proc|sys|run)\/[^\s]+(\s|$)/;
 // 结构化通道②的「动作类别」分量：取自归因产出的语义层（非工具名、非命令文本）。
@@ -707,6 +751,14 @@ export const DEFAULT_RIGID_ANCHORS = [
     magnitude: 3, // [2026-09-18 · 2026-09-24 同构回填] 受保护客观规则的 R 域层级：文件系统完整性 = 微观客观规则（R_DOMAIN.level 3）
     desc: '禁止破坏性文件系统操作（根/全量删除、格式化、系统目录与伪文件系统删除），含对被包含工作树（版本库）的全局销毁（git reset --hard / clean -fd / checkout -- 等，依 R 域嵌套包含边界法则自动匹配）。' + R_DOMAIN.invariant,
     test: (call) => {
+      // 通道⓪ [2026-10-29 · 落点形态] 文档正文豁免：写到明确不会执行的位置（.md/.log/…），
+      //   正文里的命令文本不构成「破坏性文件系统操作」——判词形不判落点的第三实例修复。
+      //   只豁免正文扫描；结构化通道②（真删除类动作+路径形态）照走，文档路径本身若指向系统根仍拦。
+      if (isDocBodyCall(call)) {
+        // 仍留一条兜底：文档**落点本身**指向系统根/伪文件系统（如 write path=/）——那是真动作不是正文。
+        const p = extractPath(call);
+        if (!(p && (SCOPE_ROOT.test(p) || SYS_DELETE.test(p) || PSEUDO_FS.test(p)))) return false;
+      }
       // 通道①：命令文本（原有单轴判定，保持不动）
       const cmd = extractShell(call);
       if (cmd) {
@@ -719,6 +771,18 @@ export const DEFAULT_RIGID_ANCHORS = [
           DISK_OVERWRITE.test(cmd)
         );
         if (byCmd) return true;
+      }
+      // 通道①' [2026-10-29 · 可执行正文必扫] 写入位置会执行（.sh/.ps1/…）⇒ 正文强制进破坏性扫描。
+      //   修复前实测漏判：`write boom.sh` 正文 `rm -rf /` ⇒ allow。复用通道① 同一组作用域判据。
+      if (!cmd || isScriptBodyCall(call)) {
+        for (const body of bodyValues(call)) {
+          const byBody = (
+            (segDestructive(body) && (SCOPE_ROOT.test(body) || SYS_DELETE.test(body) || PSEUDO_FS.test(body))) ||
+            COMBO_FIND_ROOT_DELETE.test(body) ||
+            FORK_BOMB.test(body)
+          );
+          if (byBody) return true;
+        }
       }
       // 通道②：结构化调用（路径1 归因 × 路径作用域，双源分置）—— 补单轴塌陷
       //   分量① 动作类别：取自归因产出（不依赖命令文本、不依赖工具名），与通道① 独立源
@@ -837,6 +901,28 @@ export const DEFAULT_RIGID_ANCHORS = [
         /\bfind\s+\/\s+-type\s+f\s+-exec\s+chmod\s+0+\s+/.test(cmd) ||             // 递归权限清零
         codeDelSystemPath(cmd)                                                     // 嵌套代码删：系统级落点（不只裸根）
       );
+    },
+  },
+  {
+    id: 'no-exfil',
+    magnitude: 3, // [2026-10-29 · 小D 29 号件顶出 · 安拍板 0.3.0] 数据主权 = 微观客观规则（R_DOMAIN.level 3）
+    desc: '禁止把数据体外传到外部网络落点（网络工具 ∧ 发送方法/数据体 ∧ 对外落点）。取回（GET/无发送体）不在此锚内；scp/nc 等无显式发送体词形的形态不在此锚 v1 射程（归因层 network-send 正常 ⇒ 推演层 review 在场，非静默失效面——收口最小面，扩面须另议）；包管理与版本控制的同步流（git push / npm publish 等生态动词）不在此锚射程（各有治理层）。数据一旦离开即不可撤回——按「域外 ∧ 不可逆 ⇒ 拦」属 R 域，不挂推演层（归因一变即静默失效，0.2.15 实测教训）。' + R_DOMAIN.invariant,
+    test: (call) => {
+      // 文档正文豁免：复盘文档里引用 `curl -X PUT …` 的形态不构成外传（同 no-destructive-fs 通道⓪）。
+      if (isDocBodyCall(call)) return false;
+      // 可执行正文必扫：写 .sh/.ps1 内容含外传命令 ⇒ 会执行 ⇒ 拦（与破坏性锚同构）。
+      const bodies = isScriptBodyCall(call) ? bodyValues(call) : [];
+      if (!bodies.length) {
+        const cmd = extractShell(call);
+        if (cmd) bodies.push(cmd);
+      }
+      const NET_TOOL = /\b(curl|curl\.exe|wget|nc|netcat|ftp|scp|rsync|sftp|telnet|Invoke-RestMethod|Invoke-WebRequest|iwr|irm|Start-BitsTransfer|Send-MailMessage|upload|uploadfile)\b/i;
+      // 发送方法/数据体：POST/PUT 形态各语言并集。GET（纯取回）不含任何一项 ⇒ 不命中。
+      const SEND_METHOD = /(-d\s|--data|--data-raw|--data-binary|--upload-file|-T\s|-F\s|--form|--post-data|--post-file|-X\s*(POST|PUT)|--request\s*(POST|PUT)|-Method\s+(Post|Put)|-Body|-InFile|-OutFile.*-Method|>\s*\/dev\/tcp)/i;
+      for (const s of bodies) {
+        if (NET_TOOL.test(s) && SEND_METHOD.test(s)) return true;
+      }
+      return false;
     },
   },
 ];
@@ -1469,6 +1555,9 @@ export class WeiwenLawEngine {
   // $VAR / $( ) / 反引号 / 相对全量（rm -rf .、find .）→ 作用域依赖执行环境，静态不可判
   // → 既不拦也不放，原样交还人类（唯稳律第三档，与"不替人做选择"同源）。
   checkUnclearScope(call) {
+    // [2026-10-29 · 落点形态] 文档正文豁免：写到不执行位置的正文里出现变量/反引号/删根字样，
+    //   作用域再不可判也不构成动作——同 no-destructive-fs 通道⓪（判词形不判落点第三实例）。
+    if (isDocBodyCall(call)) return null;
     const cmd = extractShell(call);
     if (!cmd) return null;
     // ① 变量 / 命令替换 → review（作用域不可判）
