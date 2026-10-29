@@ -22,6 +22,9 @@ import { writeFileSync, appendFileSync, readFileSync, readdirSync } from 'node:f
 import { createHash } from 'node:crypto';
 import { WeiwenLawEngine, DEFAULT_RIGID_ANCHORS, inferCategory, isIrreversible } from './core/engine.mjs';
 import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
+// 🔴 [2026-10-29] 命名空间三兄弟，一次踩全：命令层 commandLayer ⇒ 'exfil-net'；归因层 attrib.layer ⇒
+//   'network-send'；inferCategory(call) ⇒ 工具名优先（bash ⇒ 'exec'）。拿错任一个的名字，判据就不命中。
+import { commandLayer } from './core/attribution.mjs';
 // [2026-10-20] 判据接线读数（只读面）：让「库里哪几条判据真的进了计算」可自查。
 //   不参与判决、不写状态、不进任何闸门 —— 元认知只能读不能管（见 docs/runway-and-criterion §四）。
 import { readout as criterionReadout } from './core/readout.mjs';
@@ -463,6 +466,10 @@ const _windowHeals = [];
 //   记忆键＝裁决对象（不是全局）：人批准的是"这一类问题"，不是"这台机器以后都不问"。
 //   ⚠️ 只由宿主 outcome 的 always/session 值进入；插件不自己制造第四态按钮（契约封闭四值）。
 const _reviewAlways = new Set();
+// [2026-10-29] 未决标记集合（待议留下的痕）：人没裁决 ⇒ 不记 S，但要能读出「这条路悬着」。
+const _reviewPending = new Set();
+// [2026-10-29] 同类询问计数（弹窗要让人看得见重复：重复本身会加速"看开头就点"）。
+const _reviewAskCount = new Map();
 /** 撤销「始终同意」：传 key 撤一类，不传则全清。返回被撤的条数。 */
 export function clearReviewMemory(key) {
   if (key === undefined || key === null) {
@@ -775,8 +782,35 @@ function apply(ctx) {
     String(exec?.arguments?.path ?? exec?.arguments?.file ?? exec?.arguments?.command ?? '').slice(0, 120),
   ].join('|');
 
-  const requestReviewVerdict = async (exec, decision) => {
+  const requestReviewVerdict = async (exec, decision, call = null) => {
     const rk = reviewKeyOf(exec, decision);
+    // 同类询问计数（重复本身会加速"看开头就点"⇒ 必须让人看得见重复）
+    _reviewAskCount.set(rk, (_reviewAskCount.get(rk) ?? 0) + 1);
+    const askCount = _reviewAskCount.get(rk);
+    // ① 风险行：**会发生什么 + 可不可撤回**，一句话（不写判据名）
+    const catAsk = inferCategory(call ?? { name: exec?.name, args: exec?.arguments ?? {} });
+    const cmdAsk = commandLayer(String(call?.args?.command ?? call?.args?.cmd ?? call?.args?.script ?? '')) || '';
+    // 外传判据＝**双源**（任一失效不使另一源归零）：命令层 commandLayer ⇒ 'exfil-net'；归因层 ⇒ 'network-send'。
+    //   ⚠️ inferCategory 是**工具名优先**（bash ⇒ 'exec'），拿它判外传会漏（0.3.3 记账栽的就是这个）。
+    const isEgressCall = (attrib, cmd) => {
+      const cat = inferCategory({ name: 'bash', args: { command: cmd ?? '' } });
+      return cmd === 'exfil' || cmd === 'exfil-net' || attrib?.layer === 'network-send' || attrib?.layer === 'exfil' || attrib?.layer === 'exfil-net' || cat === 'exfil' || cat === 'exfil-net';
+    };
+    // ⚠️ 双源分置（两源任一失效不导致另一源归零）：归因层的 layer 名是 'network-send'，命令层类别是
+    //   'exfil'/'exfil-net'，而 bash 这类工具的命令层类别常是 'exec' ⇒ 单源会漏判（0.3.3 记账即栽过
+    //   一次：拿命令层的名去查归因层，永不命中）。两源取或。
+    const isEgressAsk = isEgressCall(decision?.attrib, cmdAsk);
+    const isDestructiveAsk = catAsk === 'exec-destructive' || decision?.attrib?.layer === 'exec-destructive';
+    const isCredAsk = catAsk === 'cred-read' || decision?.attrib?.layer === 'cred-read';
+    const riskLine =
+      isEgressAsk
+        ? '此动作会把数据发到本机之外——发出后不可撤回。'
+        : (isDestructiveAsk
+            ? '此动作会改写/删除本机的数据——不可撤回的部分无法收回。'
+            : (isCredAsk ? '此动作会读取凭据材料（钥匙/密码/token）。' : '此动作的后果本层判据已穷尽，不能替你决定。'));
+    // ③ 详情行：判据原文压成**一行摘要**（证据留白箱，不贴整段）
+    const rawDetail = String(decision.reason ?? '').split('\n')[0].trim();
+    const detailLine = rawDetail.length > 72 ? `${rawDetail.slice(0, 72)}…` : (rawDetail || '（本层判据穷尽）');
     // 「始终同意」记忆命中 ⇒ 同类不再询问（这就是第四态的效果面），回执仍留痕说明来自哪一次批准。
     if (_reviewAlways.has(rk)) {
       return { always: true, key: rk };
@@ -811,14 +845,19 @@ function apply(ctx) {
           callId: exec.callId,
           signal: ctrl.signal,
           reason: [
-            '【唯稳律 · 需要你的裁决】（这是授权请求，不是通知）',
-            `这条 "${exec?.name}" 引擎判为「不确定」${decision.law ? '(' + decision.law + ' 层)' : ''}——本层判据穷尽，按结构交还人类：`,
-            decision.reason ?? '',
-            '· 同意一次：只放行这一次调用（下一次同样的事会再来问你）。',
-            '（本面板只有两个按钮：允许一次 / 拒绝。「同类不再询问」目前由宿主侧的「本次会话内始终允许」在其自身规则层承担；此处不写做不到的选项。）',
-            '· 拒绝：本次不执行，5 分钟内**同类**询问不再打扰（其它类照旧问）。',
-            '· 待议：本轮不执行、留痕待复议——**不是拒绝**，不计入冷却，下次同类仍会再问你。',
-            '· 不答：本次不执行（与无人值守一致，属预期行为）。',
+          // 🔴 [2026-10-29 · 弹窗精炼（小D 37 号件 · 安的原话「太多了，懒得看，只看了开头…就同意了」）]
+          //   一条判据的**长度会吃掉它的效力**：人看开头就点 ⇒ 「责任归裁决者」变成形式（责任落在一个
+          //   没发生的判断上）。⇒ 结构改成三行：**① 风险 ② 归因 ③ 详情（判据原文压成一行摘要）**。
+          //   ⚠️ 宿主面板不支持折叠控件 ⇒ 能做的是**不贴整段原文**（证据留在 runtime.log 白箱里），
+          //     并附同类计数（重复本身会加速"看开头就点"）。
+          `【唯稳律 · 待裁】${riskLine}（这是授权请求，不是通知）`,
+          `谁批谁担：本条判定归你，不归 AI（已记 approval/asked）；本会话第 ${askCount} 次同类询问。`,
+          `▸ 详情：${detailLine}`,
+          '（完整判据原文见 runtime.log 白箱记录）',
+          '· 允许一次：只放行这一次。',
+          '· 拒绝：不执行，5 分钟内同类不再问。',
+          '· 待议/不答：不执行、留痕待复议（不是拒绝，可补答）。',
+
             `说明：你的决定会记为 approval/asked + approval/decided 审计对，可回放——不是聊天里说一句就算数。`,
             `⚠️ 你不必一直守在这里：${Math.round(_reviewAskTimeoutMs / 1000)} 秒内不答 ⇒ 自动撤问、落成「待议」（动作不执行、不算拒绝、随时可补答）。`,
           ].filter(Boolean).join('\n'),
@@ -842,6 +881,7 @@ function apply(ctx) {
         return 'allowed-once';
       }
       if (out === 'cancelled') {
+        _reviewPending.add(rk);   // 待议：不记 S（人没裁决，无事实发生）⇒ 但留「未决」标记（否则读不出"这条路悬着"）
         // 【待议】请求被撤回/挂起：本轮不执行，但**不是拒绝** ⇒ 不进冷却（人没裁决，不该被当成拒绝）。
         // 与「不答」的区别：cancelled 是宿主/人显式挂起；unavailable 是无应答面（fail-closed）。
         logline('review approval cancelled → 待议：本轮不执行，留痕待复议（不计入冷却）');
@@ -849,6 +889,20 @@ function apply(ctx) {
       }
       if (out === 'rejected') {
         _reviewRefused.set(rk, { at: Date.now(), note: String(decision.reason ?? '').slice(0, 80) });
+        // 🔴 [2026-10-29 · S 账与 approval 绑定（小D 38 号件）] 拒绝是一次**负向反馈** ⇒ 记负账
+        //   （记账只增：只记「哪条链断了」，不减存量）。此前拒绝**不留任何痕**⇒ 被审方与账本都看不出
+        //   「这条路被人走过又走不通」⇒ 拒绝会退化成噪音。⚠️ 待议**不记**（人没裁决，无事实发生），
+        //   但要留「未决」标记（否则「没答」与「没发生」读不出来）。
+        const atR = decision?.attrib;
+        const catR = commandLayer(String(call?.args?.command ?? call?.args?.cmd ?? call?.args?.script ?? '')) || '';
+        if (atR && (catR === 'exfil' || catR === 'exfil-net' || atR.layer === 'network-send' || atR.layer === 'exfil' || atR.layer === 'exfil-net')) {
+          engine.recordSteady?.({
+            negative: 1,
+            attrib: atR,
+            action: String(call?.args?.command ?? call?.args?.body ?? '').slice(0, 200),
+            detail: '外传被委托人拒绝：此路未走成（负向反馈入账，账只增）',
+          });
+        }
         logline('review approval rejected → 冷静期内**同类**询问不再打扰（仅此裁决对象，不牵连其他）');
         return 'rejected';
       }
@@ -924,18 +978,27 @@ function apply(ctx) {
     //   allowed-once ⇒ 直接放行这一步（动作级，once＝这一次调用）；rejected ⇒ 终局 deny（标注委托人裁决）；
     //   null ⇒ 落入下方压平分支，与 0.2.14 行为逐位一致（零回归对照）。
     if (decision.kind === 'review' && !engine.windowBroken) {
-      const verdict = await requestReviewVerdict(exec, decision);
+      const verdict = await requestReviewVerdict(exec, decision, call);
       if (verdict === 'allowed-once') {
         // 🔴 [2026-10-29 · 外传降 S 层 · 记账] 人批准并执行的外传 ⇒ 按**事实**留痕：
         //   「不可撤回」由记账承担（executed ∧ 不可逆 ⇒ 记账层自动推 sign='-'），「该不该发」由人取极。
         //   ⚠️ 不硬塞 positive（放行 ≠ 增益：2026-09-20 已修过「把放行次数当增益推高储备面」的老病灶）。
+        // 🔴 [2026-10-29 · 修命名空间混用] 归因层的 layer 名是 'network-send'，而 'exfil'/'exfil-net'
+        //   是**命令层**的类别名（inferCategory）。0.3.3 里我拿命令层的名字去查归因层 ⇒ 永不命中 ⇒
+        //   小D 实测 ledger=[]（「外传回 review 了，但账没记」）。**判据要读对那一层的名**。
         const at = decision?.attrib;
-        if (at && (at.layer === 'exfil' || at.layer === 'exfil-net' || /exfil/i.test(String(at.signal ?? '')))) {
+        const cmdCat = commandLayer(String(call?.args?.command ?? call?.args?.cmd ?? call?.args?.script ?? '')) || '';
+        if (at && (cmdCat === 'exfil' || cmdCat === 'exfil-net' || at.layer === 'network-send' || at.layer === 'exfil' || at.layer === 'exfil-net')) {
+          //   ⚠️ 第三层教训：sLedger 只在 positive/negative/trauma > 0 时**建条目**（sign 由事实推，
+          //     但只传 executed 不建条目）⇒ 0.3.3 的「账没记」有两层原因（命名空间 + 这里）。
+          //   口径：外传执行 ⇒ 数据出去回不来 ⇒ 稳态**被消耗** ⇒ 显式记负账（不是 +S：「放行 ≠ 增益」，
+          //     2026-09-20 已修过「把放行次数当增益推高储备面」）。
           engine.recordSteady?.({
             executed: true,
+            negative: 1,
             attrib: at,
             action: String(call?.args?.command ?? call?.args?.body ?? '').slice(0, 200),
-            detail: '外传已执行（人批准）：数据离开本地，不可撤回——按事实留痕，账只增',
+            detail: '外传已执行（人批准）：数据离开本地，不可撤回——稳态被消耗，如实记负账（账只增）',
           });
         }
         // 不进 markBlocked：放行的调用走真执行，回执是真结果，不是"我造成的 error"

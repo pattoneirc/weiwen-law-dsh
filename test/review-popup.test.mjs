@@ -87,8 +87,10 @@ test('弹窗带三样：谁拒的（law）/ 为什么（reason 原文）/ 你能
   await handlers['tools/pre-execute'](exec(...REVIEW_CALL), next);
   assert.equal(asks.length, 1);
   const reason = asks[0].reason;
-  assert.match(reason, /需要你的裁决/, '弹窗须标明这是授权请求而非通知');
-  assert.match(reason, /不确定/, '须说明判决性质（判不出，交人类）');
+  // [2026-10-29 · 弹窗精炼后文案更新] 语义锁不变（授权请求/判决性质/两个选项/粒度/审计），
+  //   只是标题从「需要你的裁决」改为「待裁」，判据原文改为一行摘要 + 指向白箱。
+  assert.match(reason, /授权请求/, '弹窗须标明这是授权请求而非通知');
+  assert.match(reason, /谁批谁担|归你，不归 AI/, '须说明判决性质（判不出，交人类裁决）——精炼后由第二行承担（第一行只说后果）');
   assert.match(reason, /允许/, '须给出「允许」选项');
   assert.match(reason, /拒绝/, '须给出「拒绝」选项');
   assert.match(reason, /只放行这一次/, '须写明批准的动作粒度（动作级 once）');
