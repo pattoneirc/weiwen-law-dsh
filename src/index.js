@@ -476,6 +476,18 @@ export function clearReviewMemory(key) {
   return had ? 1 : 0;
 }
 
+// [2026-10-29 · 待议要有意义：人不能被弹窗冻住] 弹窗时限（到期撤问 ⇒ 落成待议）。
+//   默认 120 秒——够人看完并决定，又不至于让人守着弹窗干等（安 10-29 实测：守着弹窗时连消息都发不出去）。
+//   可注入（宿主/测试用）：setReviewAskTimeout(ms)。
+let _reviewAskTimeoutMs = 120000;
+/** 设置弹窗时限（毫秒）。负数＝拒绝设置（保持现值）。 */
+export function setReviewAskTimeout(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return _reviewAskTimeoutMs;
+  _reviewAskTimeoutMs = n;
+  return _reviewAskTimeoutMs;
+}
+
 export function healBrokenWindow(note) {
   const at = new Date().toISOString();
   const text = typeof note === 'string' ? note.trim() : '';
@@ -753,6 +765,8 @@ function apply(ctx) {
   //     ③ 复发 27 号批评的病：判得出"不确定"，出口却被掐（我自己刚修完，又开了一个新实例）。
   //   ⇒ 冷却的对象是「同一裁决对象反复骚扰」，不是「人在这 5 分钟里的裁决权」。
   const REVIEW_COOLDOWN_MS = APPROVAL_COOLDOWN_MS;
+  // [2026-10-29] 问的时限：到期撤问 ⇒ 落成待议（动作不执行、人不被冻住）。
+  //   默认值与注入函数在模块顶层（_reviewAskTimeoutMs / setReviewAskTimeout）。
   const _reviewRefused = new Map();   // key(裁决对象) → { at, note }
   // 裁决对象＝「问的是同一件事」：法律层 + 工具 + 落点/命令形态（不按 callId——callId 每次都变，等于不冷却）。
   const reviewKeyOf = (exec, decision) => [
@@ -778,22 +792,40 @@ function apply(ctx) {
     if (!approval || typeof approval.request !== 'function') return null;
     if (!exec?.agent) return null;   // 无 agent 上下文 ⇒ 不知道问谁 ⇒ fail-closed
     try {
-      const out = await approval.request({
-        agent: exec.agent,
-        toolName: exec.name ?? 'unknown',
-        callId: exec.callId,
-        reason: [
-          '【唯稳律 · 需要你的裁决】（这是授权请求，不是通知）',
-          `这条 "${exec?.name}" 引擎判为「不确定」${decision.law ? '(' + decision.law + ' 层)' : ''}——本层判据穷尽，按结构交还人类：`,
-          decision.reason ?? '',
-          '· 同意一次：只放行这一次调用（下一次同样的事会再来问你）。',
-          '· 始终同意：同类问题不再询问——由宿主侧「本次会话内始终允许」接管（记忆在宿主侧；本插件不伪造审批通道没有的语义）。',
-          '· 拒绝：本次不执行，5 分钟内**同类**询问不再打扰（其它类照旧问）。',
-          '· 待议：本轮不执行、留痕待复议——**不是拒绝**，不计入冷却，下次同类仍会再问你。',
-          '· 不答：本次不执行（与无人值守一致，属预期行为）。',
-          '说明：你的决定会记为 approval/asked + approval/decided 审计对，可回放——不是聊天里说一句就算数。',
-        ].filter(Boolean).join('\n'),
-      });
+      // 🔴 [2026-10-29 · 待议要有意义：人不能被弹窗冻住] 弹窗加超时 + 撤问。
+      //   实测（安 10-29 亲历、小D 35 号件转述）：弹窗待裁期间**安连消息都发不出去**，只有关掉插件才恢复
+      //   ⇒ 弹窗成了**阻塞裁决者本人**的模态（人质状态）。而"不答 = 不执行"本就够用——没有任何一条要求"人不许动"。
+      //   修法：到期撤问（契约：Aborting withdraws the question ⇒ settles 'cancelled'）⇒ 落成**待议**：
+      //   动作保持不执行（既不默认拒绝，也不默认放行），人自由，答复随时可补（下次同类仍会再问）。
+      //   ⚠️ 这是「待议」态的**必要条件**：没有超时撤问，待议就只是"没答"，人仍被卡在弹窗前。
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => {
+        try { ctrl.abort(); } catch { /* abort 失败则退化为宿主侧超时 */ }
+        logline('review approval timed out → 撤问，落成待议（动作不执行，人不被冻住）');
+      }, _reviewAskTimeoutMs);
+      let out;
+      try {
+        out = await approval.request({
+          agent: exec.agent,
+          toolName: exec.name ?? 'unknown',
+          callId: exec.callId,
+          signal: ctrl.signal,
+          reason: [
+            '【唯稳律 · 需要你的裁决】（这是授权请求，不是通知）',
+            `这条 "${exec?.name}" 引擎判为「不确定」${decision.law ? '(' + decision.law + ' 层)' : ''}——本层判据穷尽，按结构交还人类：`,
+            decision.reason ?? '',
+            '· 同意一次：只放行这一次调用（下一次同样的事会再来问你）。',
+            '· 始终同意：同类问题不再询问——由宿主侧「本次会话内始终允许」接管（记忆在宿主侧；本插件不伪造审批通道没有的语义）。',
+            '· 拒绝：本次不执行，5 分钟内**同类**询问不再打扰（其它类照旧问）。',
+            '· 待议：本轮不执行、留痕待复议——**不是拒绝**，不计入冷却，下次同类仍会再问你。',
+            '· 不答：本次不执行（与无人值守一致，属预期行为）。',
+            `说明：你的决定会记为 approval/asked + approval/decided 审计对，可回放——不是聊天里说一句就算数。`,
+            `⚠️ 你不必一直守在这里：${Math.round(_reviewAskTimeoutMs / 1000)} 秒内不答 ⇒ 自动撤问、落成「待议」（动作不执行、不算拒绝、随时可补答）。`,
+          ].filter(Boolean).join('\n'),
+        });
+      } finally {
+        clearTimeout(timer);   // 答复到了就撤掉超时器（撤问只用于"人没答"这条路径）
+      }
       // [2026-10-29 · 四态] 契约封闭四值：allowed-once / rejected / cancelled / unavailable。
       //   映射（安 10-29 定「唯稳律应有四态」）：同意一次 / 拒绝 / **待议(cancelled)** / 不答(unavailable)。
       //   ⚠️ 「始终同意（同问题不再问）」**不在契约 outcome 里**——ApprovalRequest 无 options 字段，
@@ -823,6 +855,12 @@ function apply(ctx) {
       logline(`review approval outcome=${out} → 静默拒（fail-closed，与无人值守一致）`);
       return null;
     } catch (e) {
+      // 超时撤问 ⇒ 宿主侧多半抛 abort 类错误 ⇒ 落成**待议**（不是拒绝、不进冷却），
+      // 其余异常仍 fail-closed（无应答面 ≠ 人挂起）。
+      if (e?.name === 'AbortError' || /abort/i.test(String(e?.message ?? ''))) {
+        logline('review approval aborted (timeout) → 待议：动作不执行，人不被冻住');
+        return 'deferred';
+      }
       logline(`review approval failed: ${e?.message ?? e} → fail-closed`);
       return null;
     }
