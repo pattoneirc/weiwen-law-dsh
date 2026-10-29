@@ -104,24 +104,48 @@ export const STRATA = [
     formula: '扩容 ⟺ (ΣS > R₀) ∧ 质(S 经 M 沉淀)   ｜  R₀ = p_max × N_opp（RATE 类）；他类改走 |S_dev|>tol / 覆盖率 / 排序',
     quantities: [
       {
-        key: 'sHistoryThickness',
-        label: 'ΣS（历史厚度·**财务口径＝结构锚点数**）',
-        expr: 'count(rStore where sign ∈ {+,−})  // 单位＝结构锚点数（**财务口径**）',
+        key: 'sThicknessStandIn',
+        label: 'ΣS 厚度（**占位**＝占「结构锚点厚度」这个位）',
+        expr: 'count(rStore where sign ∈ {+,−})  // 单位＝有方向的刻痕数（**这是代理，不是真身**）',
         status: QSTAT.OK,
         dim: '时间维度·只增',
-        note: '伤疤也计入厚度 —— 这是「记账只增」的应有之义，但**不代表稳态变好**。🔴 取自全量账（rStore），不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。🔴 2026-10-29（安 43 号件原话＋小D 41 号件）：这个取数口原来数的是**事件数（流水）**，连 sign=unknown 的事件（H 一笔没付）也计入 ⇒ 会计账混进财务账、扩容判据拿流水当 ΣS。⇒ 现改为**结构锚点数**（财务口径）；流水计数见 sEventCount。',
+        placeholder: true,
+        yOrigin: '🔴 **占位字段**：真身的 Y 侧出处已找到 —— law.mjs `R_EXPANSION.qualification`：「反哺资格 ＝ 量(ΣS > R₀) ∧ 质(**经 M 反馈沉淀的 S**，走完 D→H→M→顺痕回读一轮)」。⇒ **结构锚点 ＝ 经 M 反馈沉淀的 S**（框架原文，非自造词）。⚠️ 本字段现取的数是**代理**（有方向的刻痕数）⇒ 它与真身的关系是「占位」：名字自带 stand-in 标记，不与真身同名（命名纪律：占位字段名必须自带占位标记，不得冒充真身）。⚠️ **占位不得进判定**。真身计数见 sMSediment（只读观测）；同类差分见 sClassDiff。',
+        note: '🔴 2026-10-29（安 10-29 定「唯稳律里没有一个变量是拍脑袋来的」＋手稿图2「Y 每个点为 S 是规则」）：本字段**没有**独立 Y 出处 ⇒ 按元判据降级为**占位**，不再自称「财务口径」。此前它自称「结构锚点数／财务口径」（0.3.6/0.3.7）——那是**代理冒充变量**，已改正。取自全量账（rStore）不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。伤疤也计入 —— 「记账只增」的应有之义，但不代表稳态变好。',
       },
       {
-        key: 'sSettledThickness',
-        label: 'ΣS 沉淀厚度（财务口径＝有方向的刻痕数）',
-        expr: 'count(rStore where sign ∈ {+,−})  // 单位＝有依据的稳态变化数',
+        key: 'sHistoryThickness',
+        label: 'ΣS 历史厚度（**旧名·兼容别名** ⇒ 请改读 sThicknessStandIn）',
+        expr: 'count(rStore where sign ∈ {+,−})  // 同 sThicknessStandIn（值相同）',
         status: QSTAT.OK,
         dim: '时间维度·只增',
-        note: '🔴 2026-10-29（按安 10-29 的财务/会计之分落）：S ＝ 财务账（沉淀），流水 ＝ 会计账（S 外部暂时挂载）。⇒ 沉淀厚度只数**有方向**的刻痕（sign ∈ {+,−}）；unknown / 中性事件只进事件数，不进沉淀。⚠️ 距离安的原话还差一格：「H 有没有支付」的载体尚未建成 ⇒ 现以「有方向」作代理（已如实标注）。',
+                alias: true,   // 旧名兼容别名（故意不自带占位标记：它不是占位本体，是旧名通道）
+placeholder: true,
+        yOrigin: '同 sThicknessStandIn（占位；真身出处见 law.mjs R_EXPANSION.qualification）。',
+        note: '⚠️ **旧名兼容别名**（保留是为了不切断小D 的对照链）—— 权威名已改为 `sThicknessStandIn`（占位名自带标记）。本字段**不是**独立口径，读它等于读占位字段；勿当真身读。',
+      },
+      {
+        key: 'sMSediment',
+        label: '经 M 反馈沉淀的 S 计数（**结构锚点的真身计数·只读观测**）',
+        expr: 'count(historyTrail where type = "S+1")  // 单位＝经 M 沉淀的 S 条数',
+        status: QSTAT.OK,
+        dim: '结构锚点·真身',
+        yOrigin: 'law.mjs `R_EXPANSION.qualification`：「反哺资格 ＝ 量(ΣS > R₀) ∧ 质(**经 M 反馈沉淀的 S**，走完 D→H→M→顺痕回读一轮)」。',
+        note: '🔴 **这是真身**（Y 侧有原文出处），与 sThicknessStandIn（占位）不同类。⚠️ 当前 `S+1` 几乎不产生（0.3.8 之前明写「不再记 positive」）⇒ **+S 入口空着的真因不是口径，是「闭环成功」没接进记账** ⇒ 本数现在如实显示 0/极少。⚠️ **只读观测**：本数不进判定。',
+      },
+      {
+        key: 'sClassDiff',
+        label: '同类差分（**只读观测面·不是判据**）',
+        expr: 'group historyTrail by (subsystem, topic) ⇒ compare first vs last sign  // 同类走向是否变过',
+        status: QSTAT.OK,
+        dim: '跨时点·只读',
+        yOrigin: '框架原文（铁律 #16）：「载重不可在记账时观测（属内 H）⇒ 靠**同类 D 重现时行为是否变**反推」。',
+        note: '🔴 **只读观测面**（安 10-29 裁：「先做只读版，只统计、不进账、不改判定；先看数、不急着立判据，免得又拍脑袋」）。读的是**同类走向的差分**（失败→成功 ＝ 路径被改变 ＝ 结构锚点的候选形态）。⚠️ **差分大 ≠ 就是结构锚点** —— 真身判据未落 ⇒ 本数仅供看形态，**不进判定**。',
       },
       {
         key: 'sEventCount',
         label: '事件数（会计口径＝全部离散事件）',
+        yOrigin: '安 10-29（43 号件原话）：「**S 的会计账记流水计数**」「流水账这个东西只能算 S 外部暂时挂载的会计账本」。',
         expr: 'count(sAccount.rStore)  // 单位＝离散事件数（含 unknown / 中性）',
         status: QSTAT.OK,
         dim: '时间维度·只增',
@@ -130,6 +154,7 @@ export const STRATA = [
       {
         key: 'sOverdraft',
         label: '透支额（欠了多少）',
+        yOrigin: '框架 law.mjs S：「负向侵蚀取**绝对值** |S-1|，不以代数符号消解历史」「历史刻痕不可逆」＋ 安 10-29：见底（储备为 0）与透支（欠账）在因果上不同 ⇒ 分读。',
         expr: 'Σ max(0, −net_subsystem)  // 与储备读数分开',
         status: QSTAT.OK,
         dim: '欠账方向',
@@ -138,6 +163,7 @@ export const STRATA = [
       {
         key: 'sNow',
         label: 'S_now（当前值）',
+        yOrigin: '框架 law.mjs S：「②当前值维度因正负影响可升可降」「短板效应：多系统 S 取 min（木桶效应），决定整体稳态上限」。',
         expr: 'min over sBySubsystem',
         status: QSTAT.OK,
         dim: '当前值维度·可降',
@@ -146,6 +172,7 @@ export const STRATA = [
       {
         key: 'rCapPMax',
         label: 'p_max（域常数·容许失效率）',
+        yOrigin: '框架 law.mjs R_DOMAIN（域 ＝ 锚点定出的作用范围与量级刻度）＋ rCapacity.mjs（航空 1E-9/h、汽车 1E-8/h…有标准号、有数值、有单位）。',
         expr: 'R_CAPACITY[domain].value',
         status: QSTAT.OK,
         dim: '域常数·已取证',
@@ -154,6 +181,7 @@ export const STRATA = [
       {
         key: 'nOpportunities',
         label: 'N_opp（总运行机会数·分母）',
+        yOrigin: '框架 law.mjs R_EXPANSION：「扩容 ⟺ (ΣS > R₀)」，其中 R₀ = p_max × N_opp ⇒ N_opp 是公式**自带**的分母（不是自造量）。',
         expr: 'engine.nOpportunities  // 飞行小时数／总输注次数／总交易笔数',
         status: QSTAT.ABSENT,
         dim: '分母',
@@ -163,6 +191,7 @@ export const STRATA = [
       {
         key: 'rNaught',
         label: 'R₀（域容量阈值）',
+        yOrigin: '框架 law.mjs R_EXPANSION：「扩容 ⟺ (ΣS > R₀)（严格大于）才触发 R 子链扩容」。',
         expr: 'p_max × N_opp  // 仅 RATE 类；其他量纲见 rCapRoute',
         status: QSTAT.PENDING,
         dim: '域常数 × 分母',
@@ -172,6 +201,7 @@ export const STRATA = [
       {
         key: 'rCapRoute',
         label: '接入路由（该域该用哪条公式）',
+        yOrigin: '框架 law.mjs R_EXPANSION.qualification：域不同 ⇒ **公式不同，不是阈值不同**（量纲定路由，不靠域名查表）。',
         expr: 'rCapRoute(kind, sUnit)',
         status: QSTAT.OK,
         dim: '结构路由',
@@ -180,6 +210,7 @@ export const STRATA = [
       {
         key: 'sQualified',
         label: '质条件（是否经 M 沉淀）',
+        yOrigin: '框架 law.mjs R_EXPANSION.qualification：「反哺资格 ＝ 量(ΣS > R₀) ∧ 质(**经 M 反馈沉淀的 S**，走完 D→H→M→顺痕回读一轮)」；X 轴枚举**不具**此资格。',
         expr: 'count(sAccount.sign ∈ {+,−}) > 0 ∧ 存在对应 M 落点',
         status: QSTAT.OK,
         dim: '质条件',
@@ -207,11 +238,13 @@ export const STRATA = [
         label: 'S_now（当前值）',
         expr: 'min over sBySubsystem',
         status: QSTAT.OK,
-        dim: '当前值维度',
+                yOrigin: '框架 law.mjs S：「②当前值维度因正负影响可升可降」「短板效应：多系统 S 取 min（木桶效应）」。',
+dim: '当前值维度',
       },
       {
         key: 'sPositive',
         label: '正向事件数',
+        yOrigin: '框架 law.mjs S：「正向影响走 S 路径 S→S+1 增强」「『+1』表示一次独立的离散事件」＋ 安 43 号件：「+S 对于唯稳律的意义是**正向锚点**」。',
         expr: "count(historyTrail.type === 'S+1')",
         status: QSTAT.OK,
         dim: '事件计数',
@@ -219,6 +252,7 @@ export const STRATA = [
       {
         key: 'sNegative',
         label: '负向侵蚀数',
+        yOrigin: '框架 law.mjs S：「负向影响走 D 路径 S→S-1 削弱（当前值下降，但该侵蚀事件本身作为历史刻痕以**绝对值**永久记录）」＋ 安 43 号件：「|-S| 是**负向锚点**」。',
         expr: "count(historyTrail.type === '|S-1|') + count('trauma')",
         status: QSTAT.OK,
         dim: '事件计数',
@@ -226,6 +260,7 @@ export const STRATA = [
       {
         key: 'sTrauma',
         label: 'trauma 计数',
+        yOrigin: '手稿原话：**|−S| ＝ 负向积累（创伤、失败、挫折……）**（安 10-29 43/44 号件引）。',
         expr: 'traumaCount',
         status: QSTAT.OK,
         dim: '刻痕',
@@ -233,6 +268,7 @@ export const STRATA = [
       {
         key: 'sTrailCoverage',
         label: '刻痕覆盖率（两源一致性）',
+        yOrigin: '框架 law.mjs S：「①时间维度——所有发生过的事不可改变或移除，只沉淀为历史，历史刻痕不可逆（不可消解）」。',
         expr: 'count(historyTrail) / count(sAccount.rStore)',
         status: QSTAT.OK,
         dim: '比例',
@@ -255,6 +291,7 @@ export const STRATA = [
       {
         key: 'dScarRate',
         label: '不可逆占比',
+        yOrigin: '框架 law.mjs S：「负向侵蚀取绝对值 |S-1| …不以代数符号消解历史」（不可逆是**既有的**可逆性分类，不是新增判据）。',
         expr: 'count(sAccount.reversible === "scar") / count(sAccount)',
         status: QSTAT.OK,
         dim: '比例',
@@ -263,6 +300,7 @@ export const STRATA = [
       {
         key: 'dUnknownRate',
         label: '可逆性不可判占比',
+        yOrigin: '框架：不可判 ≠ 零风险（落在保守侧，且必须显式报出）——「未知不可折叠进已知」。',
         expr: 'count(reversible === "unknown") / count(sAccount)',
         status: QSTAT.OK,
         dim: '比例',
@@ -271,6 +309,7 @@ export const STRATA = [
       {
         key: 'dMax',
         label: 'D_max（多系统取最大）',
+        yOrigin: '框架 MULTI_SYSTEM_RULES.dMax（多系统 D 取最大；**engine 内未核到实现** ⇒ 如实报未实现，不拿单系统近似冒充）。',
         expr: 'max over subsystems',
         status: QSTAT.ABSENT,
         evidence: 'MULTI_SYSTEM_RULES.dMax —— engine 内未核到实现；多系统是否在引擎语义内尚未定。',
@@ -290,20 +329,46 @@ export const STRATA = [
     formula: 'H_load = 有依据刻痕 / 总刻痕（承担率）',
     quantities: [
       {
-        key: 'hPaymentRate',
-        label: '承担率',
-        expr: 'count(sign ∈ {+,−}) / count(sAccount)',
+        key: 'hPaymentStandIn',
+        label: '承担率（**占位**＝占「H 承担率」这个位）',
+        expr: 'count(sign ∈ {+,−}) / count(sAccount)  // **这是代理**：有方向的刻痕占比',
         status: QSTAT.OK,
         dim: '比例',
-        note: '载重是能动性唯一可观测的面（铁律 #16）：付了消耗才是满载。',
+        placeholder: true,
+        yOrigin: '🔴 **占位**：真身＝「H 有没有支付动作」（安 10-29 43 号件原话：「能不能进入 S 这个财务账，需要看 H 这个主体有没有支付动作」）。⚠️ 现取数口是**代理**（以「有方向」代理「支付」）——**H 的支付动作含内 H（不可侵、不可审计），外 H 只能观测 ⇒ 当场不可判**；真身只可能**跨时点反推**（框架原文：载重不可在记账时观测 ⇒ 靠同类 D 重现时行为是否变反推）。⇒ 名字自带 stand-in 标记，不冒充真身。⚠️ **占位不得进判定**。',
+        note: '载重是能动性唯一可观测的面（铁律 #16）：付了消耗才是满载。⚠️ 但「有方向」≠「支付」（方向可由 scar 推导，支付须 H 亲认领代价）⇒ 本数是占位；真身观测面见 sClassDiff（只读）。',
+      },
+      {
+        key: 'hPaymentRate',
+        label: '承担率（**旧名·兼容别名** ⇒ 请改读 hPaymentStandIn）',
+        expr: '同 hPaymentStandIn（值相同）',
+        status: QSTAT.OK,
+        dim: '比例',
+                alias: true,   // 旧名兼容别名（故意不自带占位标记：它不是占位本体，是旧名通道）
+placeholder: true,
+        yOrigin: '同 hPaymentStandIn（占位）。',
+        note: '⚠️ **旧名兼容别名**（保留是为了不切断小D 的对照链）—— 权威名已改为 `hPaymentStandIn`。',
+      },
+      {
+        key: 'hExemptStandIn',
+        label: '免责率（**占位**＝占「H 免责率」这个位）',
+        expr: 'count(sign === "unknown") / count(sAccount)  // **这是代理**：不可判刻痕占比',
+        status: QSTAT.OK,
+        dim: '比例',
+        placeholder: true,
+        yOrigin: '🔴 **占位**：真身＝「H 是否被豁免」（内 H 侧，不可当场判）⇒ 现取数口（sign=unknown 占比）是代理。⚠️ 名字自带 stand-in 标记，不冒充真身；**占位不得进判定**。',
+        note: '🔴 免责率升高 ⇒ 载重被摘掉（v10 病灶的量化形态）。它不违反守真，但**不产生判断力**。⚠️ 本数是占位（代理），真身观测面见 sClassDiff（只读）。',
       },
       {
         key: 'hExemptRate',
-        label: '免责率',
-        expr: 'count(sign === "unknown") / count(sAccount)',
+        label: '免责率（**旧名·兼容别名** ⇒ 请改读 hExemptStandIn）',
+        expr: '同 hExemptStandIn（值相同）',
         status: QSTAT.OK,
         dim: '比例',
-        note: '🔴 免责率升高 ⇒ 载重被摘掉（v10 病灶的量化形态）。它不违反守真，但**不产生判断力**。',
+                alias: true,   // 旧名兼容别名（故意不自带占位标记：它不是占位本体，是旧名通道）
+placeholder: true,
+        yOrigin: '同 hExemptStandIn（占位）。',
+        note: '⚠️ **旧名兼容别名**（保留是为了不切断小D 的对照链）—— 权威名已改为 `hExemptStandIn`。',
       },
     ],
     stopAt: [
@@ -321,6 +386,7 @@ export const STRATA = [
       {
         key: 'mConcentration',
         label: '落点集中度',
+        yOrigin: '框架 law.mjs CONVERGENCE：「收敛度 ＝ 落点集中度的**单调方向**（非容差、非阈值）」——真链＝观测增多则集中度上升。',
         expr: '同 R 落点事件数 / 不同 R 落点数',
         status: QSTAT.OK,
         dim: '结构量',
@@ -329,6 +395,7 @@ export const STRATA = [
       {
         key: 'mDirection',
         label: '方向（近/远/不动）',
+        yOrigin: '框架 law.mjs CONVERGENCE.threshold（**明令不可定阈值/容差** ⇒ 只报方向，永不写容差）。',
         expr: 'sign(concentration_after − concentration_before)',
         status: QSTAT.PENDING,
         dim: '单调方向',
@@ -338,6 +405,7 @@ export const STRATA = [
       {
         key: 'mForwardWired',
         label: '未来格是否接线',
+        yOrigin: '框架：M 第一 Bug 停机 + 前向推演面（FORWARD_INFERENCE / M_TWO_TENSES；当前**零接线** ⇒ 如实报未接，不报「收敛度为零」）。',
         expr: 'engine 内是否存在前向推演输出面',
         status: QSTAT.ABSENT,
         evidence: 'FORWARD_INFERENCE / M_TWO_TENSES —— 零接线（readout.phaseReadout 已登记）。',
@@ -417,8 +485,59 @@ export function dataSurface(engine) {
   const maxCluster = domains.size ? Math.max(...domains.values()) : 0;
   const concentration = total ? maxCluster / total : null;
 
+  // ═══ 只读差分观测面（2026-10-29 · 安 10-29 裁「先看数、不急着立判据」）═══
+  // 🔴 为什么是只读：安 10-29 的裁定——「同类 D 重现差分」这个观测面**先做只读版**（只统计、不进账、
+  //   不改判定），让小D 那边跑一跑看它长什么样；「先看数、不急着立判据，免得又拍脑袋」。
+  //   ⇒ 本段**只产出读数**：不进 sLedger、不改 verdict、不影响任何 pre-execute 路径。
+  //
+  // 真身的 Y 侧定义（law.mjs `R_EXPANSION.qualification` 原文）：
+  //   「反哺资格 ＝ 量(ΣS > R₀) ∧ 质(**经 M 反馈沉淀的 S**，走完 D→H→M→顺痕回读一轮)」
+  //   ⇒ **结构锚点 ＝ 经 M 反馈沉淀的 S**。载体：**historyTrail 里的 `S+1`**（那是唯一的正向沉淀刻痕）。
+  //   ⇒ 当前 `S+1` 几乎不产生（0.3.8 之前明写「不再记 positive」）⇒ **+S 入口空着的真因不是口径，
+  //     是「闭环成功」没接进记账**。
+  const mTrail = arr(engine.historyTrail);   // 🔴 变量名不与既有 trail（historyTrail 聚合）撞
+  // 「经 M 沉淀的 S」计数 ＝ 正向沉淀刻痕数（真身当前的计数；为 0 就如实显示 0）
+  const mSediment = mTrail.filter((e) => e && e.type === 'S+1').length;
+  // 同类差分：按 (subsystem, topic) 分组，比较**首次**与**最近一次**的刻痕方向。
+  //   🔴 「同类」＝ 同 topic（topic 是同类事件的判别键，见 law.mjs S 时间周期模型）⇒ 不是词形枚举。
+  //   「差分」＝ 同类事件的走向是否变了（失败 → 成功 ＝ 路径被改变 ＝ 结构锚点的候选形态）。
+  //   ⚠️ 这**只是观测**：差分大 ≠ 就是结构锚点；真身要等 Y 侧判据落定（当前只有 law.mjs 的定义，
+  //     取数口未落 ⇒ 本数仅供看形态，不进判定）。
+  const byClass = new Map();
+  for (const e of mTrail) {
+    if (!e) continue;
+    const key = `${e.subsystem ?? 'core'}::${e.topic ?? '∅'}`;
+    if (!byClass.has(key)) byClass.set(key, []);
+    byClass.get(key).push(e);
+  }
+  const classDiff = [];
+  for (const [key, list] of byClass) {
+    const ordered = list.slice().sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+    const first = ordered[0];
+    const last = ordered[ordered.length - 1];
+    const signOf = (e) => (e.type === 'S+1' ? '+' : (e.type === 'trauma' ? 'trauma' : (e.type === '|S-1|' ? '-' : '0')));
+    const fs = signOf(first);
+    const ls = signOf(last);
+    classDiff.push({
+      class: key,
+      marks: ordered.length,
+      firstSign: fs,
+      lastSign: ls,
+      changed: fs !== ls,                                   // 同类走向变了（差分的最小形态）
+      settled: ordered.some((e) => e.type === 'S+1'),      // 该类出现过「经 M 沉淀的 S」
+      lastTs: last.ts ?? null,
+    });
+  }
+  const classDiffSummary = {
+    classes: classDiff.length,
+    changed: classDiff.filter((c) => c.changed).length,       // 走向变过的同类数（差分命中）
+    settled: classDiff.filter((c) => c.settled).length,       // 出现过正向沉淀的同类数
+    entries: classDiff,
+  };
+
   return {
     thickness, settledThickness, eventCount, trailEvents, trailCoverage, positives, negatives, sNow, sOverdraft,
+    mSediment, classDiff: classDiffSummary,
     traumaCount: num(engine.traumaCount) ?? 0,
     scar, unknown, paid, total, concentration, maxCluster,
     distinctDomains: domains.size,
@@ -436,7 +555,9 @@ export function compute(key, surface) {
   const s = surface;
   switch (key) {
     case 'sHistoryThickness': return s ? { status: QSTAT.OK, value: s.thickness } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
-    case 'sSettledThickness': return s ? { status: QSTAT.OK, value: s.settledThickness } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sThicknessStandIn': return s ? { status: QSTAT.OK, value: s.settledThickness } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sMSediment': return s ? { status: QSTAT.OK, value: s.mSediment } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sClassDiff': return s ? { status: QSTAT.OK, value: s.classDiff } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sEventCount': return s ? { status: QSTAT.OK, value: s.eventCount } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sOverdraft': return s ? { status: QSTAT.OK, value: s.sOverdraft } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sNow': return s ? { status: QSTAT.OK, value: s.sNow } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
@@ -446,7 +567,9 @@ export function compute(key, surface) {
     case 'sTrailCoverage': return s ? { status: QSTAT.OK, value: s.trailCoverage } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'dScarRate': return s && s.total ? { status: QSTAT.OK, value: s.scar / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
     case 'dUnknownRate': return s && s.total ? { status: QSTAT.OK, value: s.unknown / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
+    case 'hPaymentStandIn': return s && s.total ? { status: QSTAT.OK, value: s.paid / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
     case 'hPaymentRate': return s && s.total ? { status: QSTAT.OK, value: s.paid / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
+    case 'hExemptStandIn': return s && s.total ? { status: QSTAT.OK, value: s.unknown / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
     case 'hExemptRate': return s && s.total ? { status: QSTAT.OK, value: s.unknown / s.total } : { status: QSTAT.PENDING, value: null, evidence: '账本为空或无实例' };
     case 'mConcentration': return s ? { status: QSTAT.OK, value: s.concentration } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     // ── R 层：域常数 / 分母 / 路由（2026-10-20 重写）────────────────
@@ -511,8 +634,34 @@ export function strataReadout(engine = null) {
       stopAt: st.stopAt,
     };
   });
+  // ═══ 准入诊断（元判据的可执行形态 · 2026-10-29）═══
+  // 🔴 安 10-29 定：「唯稳律里没有一个变量是拍脑袋来的」＋手稿图2「Y 每个点为 S 是规则 / X 每个点为 D 是数据」
+  //   ⇒ 每个读数字段必须能指回 **Y 侧的一条规则**（= 有 yOrigin）；指不回的 ⇒ 它只能是**占位**
+  //   （= placeholder:true，且**名字必须自带占位标记**），**且不得进判定**。
+  //   ⚠️ 为什么做成**读数面诊断**而不是硬拒绝注册：与 readout.mjs 同一原则——「元认知只能读，不能管」；
+  //     硬拒绝会把存量字段一次性判红（不可回放）。⇒ 缺口**摆到读数面上**，让「哪些是拍脑袋的」当场可见。
+  //   ⇒ 配套纪律（可测）：**占位字段名必须自带占位标记**（stand-in / slot / 占位）⇒ 由测试锁。
+  const allQs = layers.flatMap((l) => l.quantities);
+  const PLACEHOLDER_MARK = /(stand[-_ ]?in|slot|占位|替身)/i;
+  const unbacked = allQs.filter((q) => !q.placeholder && !(q.yOrigin && String(q.yOrigin).trim()))
+    .map((q) => q.key);
+  const placeholders = allQs.filter((q) => q.placeholder && !q.alias).map((q) => ({
+    key: q.key,
+    markedInName: PLACEHOLDER_MARK.test(q.key),
+    yOrigin: q.yOrigin ?? null,
+  }));
+  const placeholderWithoutMark = placeholders.filter((p) => !p.markedInName).map((p) => p.key);
+  const aliases = allQs.filter((q) => q.alias).map((q) => q.key);   // 旧名兼容通道（不算占位本体）
   return {
     layers,
+    // 准入诊断面：拍脑袋的变量当场可见（不是注释里的自觉，是读数面上的清单）
+    provenance: {
+      unbacked,                                   // 既无 Y 出处、又未标占位 ⇒ 拍脑袋的变量（应为空）
+      placeholders,                               // 占位字段清单（含「名字是否自带占位标记」）
+      placeholderWithoutMark,                     // 占位却没在名字里带标记 ⇒ 违反命名纪律
+      aliases,                                    // 旧名兼容别名清单（保留是为了不切断对照链）
+      rule: '每个读数字段须有 yOrigin（Y 侧规则出处）；无出处 ⇒ 只能是占位（名字自带 stand-in/slot/占位 标记）且不得进判定。',
+    },
     bans: SUBSTITUTION_BAN,
     domain: {
       key: surface ? surface.domainKey : null,
