@@ -1242,13 +1242,14 @@ function apply(ctx) {
     async execute() {
       // 白箱自查默认只暴露聚合视图，不 dump 全量 historyTrail（防上下文过载）
       return {
-        effectiveS: engine.effectiveS(),
+        effectiveS: engine.effectiveS(),   // 储备读数（到 0 为止）
+        overdraft: engine.overdraft(),     // 透支额（欠了多少，与储备分开读）
         ledger: engine.steadyLedger(),
         ledgerSize: engine.sLedger.size,
         standbySize: engine.sStandby.length,
         traumaCount: engine.traumaCount,
         failureStreak: engine.failureStreak,
-        note: 'ledger=活动态（最新版本）；standby=静默待机（旧版本，append-only 保留不调用）。全量 historyTrail 仅供深度审计。',
+        note: 'ledger=活动态（最新版本）；standby=静默待机（旧版本，append-only 保留不调用）。全量 historyTrail 仅供深度审计。⚠️ effectiveS 是**储备读数**（木桶最短板，下限 0：到 0 = 没有储备）；欠账看 overdraft（透支额）——负净值不装进储备（2026-10-29 按小D 39/40 号件修：见底与透支在因果上不同）。',
       };
     },
   }));

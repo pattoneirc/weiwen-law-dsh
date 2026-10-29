@@ -1468,6 +1468,22 @@ export class WeiwenLawEngine {
   //   - trauma 为历史刻痕记录（绝对值），不回退当前值。
   // 注意：真实路径为 M → H₀ 分流 → S₀(+1) 或 |S₀(S₀-1)|（见 law.mjs 的 FEEDBACK_LOOP）。
   recordSteady({ positive = 0, negative = 0, trauma = 0, subsystem = 'core', topic = null, detail = null, action = null, attrib = null, executed = false } = {}) {
+    // 🔴 [2026-10-29 · 序列化加固（小D 39 号件实测：账本条目从 0 变 7 后 query_steady_state 开始吐
+    //   「invalid output: value is not lossless JSON」）] 账本条目必须是**纯可序列化数据**：
+    //   detail/action 若传对象（attrib 之类）会把不可序列化值带进条目 ⇒ 整个读数面挂掉。
+    //   ⇒ 入口处一律规约为字符串（对象走 JSON 化，失败则截断的 String()）。
+    const safeText = (v, cap = 400) => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === 'string') return v.slice(0, cap);
+      if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+      try { return JSON.stringify(v).slice(0, cap); } catch { return String(v).slice(0, cap); }
+    };
+    detail = safeText(detail);
+    action = safeText(action, 400);
+    // attrib 只留标量字段（归因对象可能带循环引用/类实例）
+    if (attrib && typeof attrib === 'object') {
+      attrib = { layer: attrib.layer ?? null, method: attrib.method ?? null, signal: safeText(attrib.signal, 200) };
+    }
     this._settleMarked = true;      // [2026-09-24] 出口统一落点：本次裁决已落稳态刻痕（幂等依据）
     // ═══ [2026-09-24 · 如实记录（口径层修复）] sign 与 delta **同源**，且只由**可复验的事实**推得 ═══
     //   修前口径：sign 由**出口分支**给定（`positive: ok ? 1 : 0` ⇒ 放行即 '+'）。那是**评价**，不是事实 ——
@@ -1539,15 +1555,30 @@ export class WeiwenLawEngine {
   }
 
   // 木桶效应：有效 S 取各子系统最小值
+  // 🔴 [2026-10-29 · 储备与透支分读（小D 39 号件）] 修前 effectiveS = min(各子系统**净值**) ⇒
+  //   允许负值 ⇒ 木桶没有下界 ⇒「见底」（储备为 0）与「透支」（储备为负）被混在一起，而两者在因果上
+  //   完全不同（一个是"没有"，一个是"欠了"）。他 40 号补充：这不是 clamp 的问题，是**别拿流水净值当储备读数**。
+  //   ⇒ 落法（读数面分离，不是把负值夹成 0 掩盖掉）：
+  //     · effectiveS = **储备读数**：木桶最短板，下限 0（到 0 = 没有储备）；
+  //     · overdraft  = **透支额**：各子系统负净值之和（欠了多少）—— 另一个量，不混进储备。
+  //   ⇒ 「透支」从此可读可查，而不是伪装成"还剩一点"。
   effectiveS() {
     const vals = Object.values(this.sBySubsystem);
-    return vals.length ? Math.min(...vals) : 0;
+    if (!vals.length) return 0;
+    const shortest = Math.min(...vals);
+    return shortest > 0 ? shortest : 0;   // 储备读数：到 0 为止（透支见 overdraft()）
+  }
+
+  /** 透支额：各子系统负净值之和（"欠了多少"）。与储备读数分开——欠账不装进"还剩一点"。 */
+  overdraft() {
+    return Object.values(this.sBySubsystem).reduce((a, v) => a + (v < 0 ? -v : 0), 0);
   }
 
   snapshot() {
     return {
       bySubsystem: { ...this.sBySubsystem },
       effectiveS: this.effectiveS(),
+      overdraft: this.overdraft(),   // 透支额（与储备读数分开：欠了多少 ≠ 还剩多少）
       traumaCount: this.traumaCount,
       // 默认只暴露聚合后的 ledger（最新版本），避免全量 historyTrail 导致上下文过载
       ledger: this.steadyLedger(),

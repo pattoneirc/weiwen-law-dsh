@@ -37,7 +37,10 @@ test('🔴 外传获人批准并执行 ⇒ S 账**真的**记上（0.3.3 实测 
   assert.ok(after, '必须能读到账本（与 xiaoD 观测 query_steady_state 同口径）');
   assert.ok((after.ledgerSize ?? 0) > (before?.ledgerSize ?? 0),
     `外传执行后账本必须有条目（0.3.3 实测 ledger=[] ⇒ 这条没落；实测 ${before?.ledgerSize} → ${after?.ledgerSize}）`);
-  assert.notEqual(after.effectiveS, before?.effectiveS, '稳态读数必须随之变化（不是只加条目不改读数）');
+  // [2026-10-29 · 读数面分离] 外传执行记的是**负账** ⇒ 变的是**透支额**（储备读数本就不因消耗而变负，
+  //   见底与透支在因果上不同）⇒ 断言改看 overdraft。
+  assert.ok((after?.overdraft ?? 0) > (before?.overdraft ?? 0),
+    `透支额必须随之变化（负账落在透支上，不是把储备读成负数；实测 ${before?.overdraft} → ${after?.overdraft}）`);
 });
 
 test('拒绝 ⇒ 负账入账（账只增）；待议 ⇒ 不记账（人没裁决，无事实发生）', async () => {
