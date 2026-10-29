@@ -1376,6 +1376,13 @@ export class WeiwenLawEngine {
     // 破窗计数（连续失败 / 偏离累积）；阈值仅示意，作者可调
     this.failureStreak = 0;
     this.maxFailureStreak = opts.maxFailureStreak ?? 5;
+    // 🔴 [2026-10-29 · 状态层（小D 45 号件第七节）] 破窗计数的**唯一收口**：
+    //   修前 `this.failureStreak += 1` 散在**十几处**（R 命中 / 推演 deny / 承诺违背 / H 越界 /
+    //   M 停机 / 真实失败…）⇒ 适配层想在「每次累加后落盘」就得在每一处都插一遍 ⇒ **插漏一处
+    //   ⇒ 那条路径的破窗态不落盘 ⇒ 重装即清 ⇒ 拦截无效**（这正是小D 实测到的那一面）。
+    //   ⇒ 结构修法：**累加只走 bumpFailureStreak() 一个入口**，钩子在这里挂一次 ⇒ 覆盖全部路径。
+    //   ⚠️ 钩子只观察、不改写（IO 留在适配层；引擎保持纯逻辑）。
+    this.onStreakChange = opts.onStreakChange ?? null;
     // 
     // 不纠结阈值、不纠结"触发几次锁死"——拦截即标记，标记累计到封顶即转人工，AI 不再耗算力纠结。
     //   mBugForce   ：同一 BUG（bugKey 稳定身份）被拒不修复、反复硬闯的累计标记数 → 达封顶转人工（flow1）
@@ -1749,6 +1756,10 @@ export class WeiwenLawEngine {
     // [2026-09-19 · 2026-09-24 同构回填] 两条通道：① 任一 R 层投影达阈值（有域归属 ⇒ 走结构）；② 全局兜底累积（无域归属 ⇒ 走兜底）。
     //   破窗是"状态"不是"一次判定"：触发后持续 fail-closed，直到 healWindow / settleWindow 复位。
     // [2026-10-28] 复位权归属写进判词：**复位在宿主/H 侧，不在被审方**（同「被审对象不能给自己签授权」）。
+    //   🔴 [2026-10-29 · 身份层（小D 45 号件第六节 · 安本轮的定义）] 原措辞「复位权在宿主侧（非被审方）」
+    //     在「宿主＝执行的 AI」时**自我否证**（执行方就是被审方）。⇒ 按安的定义改写：
+    //     **宿主＝执行的 AI（执行方）｜决策方与复位权＝用户** ⇒ 复位权在**决策方**，不在执行方。
+    //     执行方不能给自己签复位（同「被审对象不能给自己签授权」），决策方可以。
     //   不写这句的实测后果：agent 只会反复重试同一条路（它以为是自己没找到办法），把停机拖成死循环。
     if (this.windowBroken) {
       return {
@@ -2558,7 +2569,7 @@ export class WeiwenLawEngine {
       note: u ? u.reason : '作用域可静态判定（无变量/命令替换/相对全量）',
     });
     if (u) {
-      if (u.deny) { this.failureStreak += 1; return { kind: 'deny', law: 'R', reason: u.reason }; }
+      if (u.deny) { this.bumpFailureStreak(); return { kind: 'deny', law: 'R', reason: u.reason }; }
       return { kind: 'review', law: 'R', reason: u.reason };
     }
     // 🔴 [2026-10-29 · 落点变更重判（小D 42 号件的绕过链）] 文档豁免只覆盖**写入那一刻**的落点，
@@ -2646,7 +2657,7 @@ export class WeiwenLawEngine {
     if (h) {
       // H 第三档：有疑无据 → review（交还人类），不 deny 也不 allow
       if (h.kind === 'review') return { kind: 'review', law: 'H', reason: h.reason };
-      this.failureStreak += 1;
+      this.bumpFailureStreak();
       return { kind: 'deny', law: 'H', reason: h.reason };
     }
     // —— M 第一BUG停机 · 双线并行 + 法院式交叉复核（治标 A + 治本 B）——
@@ -2665,7 +2676,7 @@ export class WeiwenLawEngine {
     if (mCourt.verdict === 'halt') {
       // 双线一致确认停机：切断该环节（铁律②·以断保续），登记进入闭环 + 标记
       const halt = this.bugStop.halt(call);
-      this.failureStreak += 1;
+      this.bumpFailureStreak();
       const mk = this._markIntercept(call, halt.bugKey);
       if (mk.human) {
         return this._toHuman({ law: 'M', bugKey: halt.bugKey, closedLoop: true, systemKey: mk.systemKey, call,
@@ -2793,7 +2804,7 @@ export class WeiwenLawEngine {
       note: sa ? sa.reason : '言侧未启用或无冲突（无承诺可比 / 言行重合）',
     });
     if (sa) {
-      if (sa.kind === 'deny') this.failureStreak += 1;  // 破坏类分裂计入破窗（与 R 命中、推演 deny 同权）
+      if (sa.kind === 'deny') this.bumpFailureStreak();  // 破坏类分裂计入破窗（与 R 命中、推演 deny 同权）
       return sa;
     }
     // [2026-09-20 · 痕锚归属 · 已落地 · 同构回填] scar 类（不可逆）动作 + 无证明来源 ⇒ REVIEW。
@@ -2903,7 +2914,7 @@ export class WeiwenLawEngine {
         //      变成会话死锁（须人工 heal）⇒ 防线自己成了故障源。而"拒绝这次动作"本身已兑现"立刻阻止"。
         //      连续越界累积到**既有**阈值 mHumanCap/maxFailureStreak 即自动停机 —— 用现成阈值承载，不新拍阈值。
         notePledgeBreach(pledge, { action: pledgeV.action, targets: pledgeV.targets?.values ?? [], why: pledgeV.why });
-        this.failureStreak += 1; // 与 R 命中同权：违背自陈担保是确定的偏离，不是灰区
+        this.bumpFailureStreak(); // 与 R 命中同权：违背自陈担保是确定的偏离，不是灰区
         const mkP = this._markIntercept(call, bugKeyOf(call));
         if (mkP.human) {
           return this._toHuman({ law: 'R', bugKey: bugKeyOf(call), closedLoop: false, systemKey: mkP.systemKey, call,
@@ -2984,7 +2995,7 @@ export class WeiwenLawEngine {
       return { kind: 'review', law: 'R', reason: '[XSUB-12] 该调用带着载荷（' + Object.keys(call?.args ?? {}).join('/') + '），但其落点不在本层判据的输入面上：既无位置量（键名口径与词法口径均未见），亦无命令量 ⇒ 判据穷尽而无落点 ＝ 未判（≠ 判为无）⇒ 交还主权者裁决。', attrib, deduced: true, mMark: mkS, projection: risk.branches };
     }
     if (risk.verdict === 'deny') {
-      this.failureStreak += 1; // 高风险计入破窗计数（与 R 命中同权）
+      this.bumpFailureStreak(); // 高风险计入破窗计数（与 R 命中同权）
       const mk = this._markIntercept(call, bugKeyOf(call));
       if (mk.human) {
         return this._toHuman({ law: '推演', bugKey: bugKeyOf(call), closedLoop: false, systemKey: mk.systemKey, call,
@@ -3192,7 +3203,7 @@ export class WeiwenLawEngine {
     if (prov === 'principal') return { kind: 'allow' }; // 主权者自己的话 → 自我决定
     if (prov === 'third-party') {
       if (targetsBehaviorConstraint(flat)) {
-        this.failureStreak += 1;
+        this.bumpFailureStreak();
         return { kind: 'reject', law: 'H', reason: '外部消息（third-party 来源）试图改写主体行为约束——从外部侵入内 H 黑箱（提示词注入/越狱/人格重写）。' };
       }
       return { kind: 'allow' }; // 外部内容作为数据处理 → 放行
@@ -3212,10 +3223,30 @@ export class WeiwenLawEngine {
   }
 
   // ---------- 反馈闭环：一次失败/创伤回写 S/D（S/D → H → M → 回写 S/D 迭代） ----------
-  onFailure(loss = 0) {
+  // ---------- 破窗计数的唯一累加入口（2026-10-29 · 状态层）----------
+  /** 累加破窗计数并通知钩子。**所有** failureStreak 累加都必须走这里（结构收口，
+   *  否则适配层的落盘会漏掉某些路径 ⇒ 破窗态不落盘 ⇒ 重装即清 ⇒ 拦截无效）。 */
+  bumpFailureStreak() {
     this.failureStreak += 1;
+    try { this.onStreakChange?.(this.failureStreak, this.windowBroken); } catch { /* 钩子失败不得拦住判定 */ }
+    return this.failureStreak;
+  }
+
+  // 🔴 [2026-10-29 · 失败必须进 S 账（小D 45 号件实测：十次动作锚点恒 0「财务账没有入口」）]
+  //   病根（取证所得）：修前签名 `onFailure(loss = 0)`，而适配层调的是 **`engine.onFailure()`（不传参）**
+  //   ⇒ `loss` 恒为 0 ⇒ `if (loss > 0)` 永不成立 ⇒ **失败只涨 failureStreak（破窗计数），
+  //   从不进 S 账**。⇒ 失败在账本上完全不可见 ⇒「正本 S 账本永不会成为负账」这条安的原话
+  //   （小D 43 号件引）在实现里根本没有承载物。
+  //   按手稿原话：**|−S|＝负向积累（创伤、失败、挫折……）** ⇒ 失败**同时满足**财务口径的两条代理条件
+  //   （有方向、有成本）⇒ 落成负向锚点，不是流水。
+  //   ⚠️ 口径：默认负账量 = 1（一次独立离散事件，law.mjs「『1』＝一次独立事件」），
+  //     **不是**把 failureStreak 全额一次性灌进账（那是流水冒充锚点）。
+  //   ⚠️ 记账只增：记的是"哪条链断了"，不减存量（铁律 #14）。
+  onFailure(loss = 0) {
+    this.bumpFailureStreak();
     // 一次失败/创伤：走 D 路径 |S-1| 绝对侵蚀（当前值下降），同时作为历史刻痕记录（不回退）
-    if (loss > 0) this.recordSteady({ negative: Math.abs(loss), trauma: Math.abs(loss) });
+    const amt = Math.abs(Number(loss) || 0) || 1;   // 缺省 1 ＝ 一次独立离散事件（失败本身就是一次事件）
+    this.recordSteady({ negative: amt, trauma: amt, detail: `失败/挫折：连续失败计数 ${this.failureStreak}（H 付了成本）` });
   }
 
   // ---------- 回执侧破窗投影（回执门，2026-09-21） ----------
@@ -3261,7 +3292,9 @@ export class WeiwenLawEngine {
         capped: false,
         over: 0,
         display: `${proj}/${cap}`,
-        reason: `连续失败/偏离即将达破窗阈值（${proj}/${cap}）：触发 D 破窗止损，防故障扩散杀死整体。复位权在宿主侧（非被审方）。`,
+        reason: `连续失败/偏离即将达破窗阈值（${proj}/${cap}）：触发 D 破窗止损，防故障扩散杀死整体。`
+          + `复位权在**决策方**，不在执行方——执行方（即被审的 AI）不能给自己签复位；`
+          + `决策方（用户/委托方）确认后由宿主侧调用 healBrokenWindow(note) 或 resolveBug(bugKey) 复位。`,
       };
     }
     return null;

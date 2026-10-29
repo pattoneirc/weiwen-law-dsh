@@ -18,7 +18,9 @@
 //
 // 仍属 RC 预览，官方提示后续存在破坏性 API 变更；接入真机前以官方 docs 当前版本复核。
 
-import { writeFileSync, appendFileSync, readFileSync, readdirSync } from 'node:fs';
+import { writeFileSync, appendFileSync, readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { WeiwenLawEngine, DEFAULT_RIGID_ANCHORS, inferCategory, isIrreversible } from './core/engine.mjs';
 import { R_DOMAIN, THREE_IRON_LAWS } from './core/law.mjs';
@@ -466,6 +468,15 @@ const _windowHeals = [];
 //   记忆键＝裁决对象（不是全局）：人批准的是"这一类问题"，不是"这台机器以后都不问"。
 //   ⚠️ 只由宿主 outcome 的 always/session 值进入；插件不自己制造第四态按钮（契约封闭四值）。
 const _reviewAlways = new Set();
+// 🔴 [2026-10-29 · 身份层（小D 45 号件第六节 · 安本轮的定义）] 宿主＝执行的 AI（执行方 executor）；
+//   决策方与复位权＝用户（decider）。⇒ 每条授权/拒绝/复位记录都必须带 actor，否则「谁造成的」读不出来。
+//   ⚠️ 这条同时解小D 45 号第五节那条降级：「判据自动放行」与「人批准」在他的观测面同形 ⇒
+//     读数面必须把 actor 显式摆出来（executor 自动放行 vs decider 人批准），否则结论依赖「动作通过了」
+//     就必须先问「是不是有人替它开过门」。
+const ACTOR_EXECUTOR = 'executor';   // 执行方（AI）：判据自动放行/拦截，无人在场
+const ACTOR_DECIDER = 'decider';     // 决策方（用户）：人点了按钮
+// 授权/拒绝/复位的审计面（谁、何时、依据什么）——append-only，可回放。
+const _actorAudit = [];
 // [2026-10-29] 未决标记集合（待议留下的痕）：人没裁决 ⇒ 不记 S，但要能读出「这条路悬着」。
 const _reviewPending = new Set();
 // [2026-10-29] 同类询问计数（弹窗要让人看得见重复：重复本身会加速"看开头就点"）。
@@ -495,9 +506,114 @@ export function setReviewAskTimeout(ms) {
   return _reviewAskTimeoutMs;
 }
 
-export function healBrokenWindow(note) {
+// ══════════ 状态层：破窗态的持久化载体（小D 45 号件第七节）══════════
+// 🔴 他实测对照（安本轮的实测）：**破窗态在插件内存** ⇒ 卸载重装即清（实测 failureStreak 5→0）；
+//   而**担保在宿主侧** ⇒ 插件重装不清。⇒ 判据：**任何「复位点／清零点」必须位于宿主可达范围之外**——
+//   不需宿主、不需修复、仅靠重启/重装就能清零的路径 ⇒ 拦截无效。
+// ⇒ 落法（他的四条，落在能落的三条）：
+//   ① 落盘位置**由宿主声明**，不放插件目录（重装会覆盖）——本实现取宿主主目录下的
+//      `~/.dsh/weiwen-law/`（插件目录之外 ⇒ 重装不清）；可用 `WEIWEN_LAW_STATE_DIR` 覆盖。
+//   ② 落盘内容可校验：单调计数 + 摘要（hash）⇒ 篡改/半截写入可检出。
+//   ③ **fail-closed**：发现「应有破窗记录却没有」⇒ 按破窗处理（记录缺失 ≠ 状态干净）。
+//   ④ 清零点写审计（谁清的、何时、依据什么）——见 _actorAudit。
+// ⚠️ **默认不落盘**（2026-10-29 改）：判据是「落盘位置**由宿主声明**，不放插件目录（重装会覆盖）」
+//   ⇒ 落盘位置是**宿主的决定**，不是插件的默认值。默认落盘有两个实测害处：
+//   ① 插件擅自往用户家目录写文件（用户没授权、测试会污染真机状态）；
+//   ② 「重装即清」虽是它要治的病，但**默认写死一个路径**＝把「在哪落盘」的决定权从宿主手里拿走了。
+//   ⇒ 默认=**仅内存**（行为与 0.3.x 一致，不假装已持久化），并在读数面**明写**这一点；
+//     宿主要持久化，就调 `declareWindowStateDir(dir)`（或设环境变量 WEIWEN_LAW_STATE_DIR）。
+let _stateDir = process.env.WEIWEN_LAW_STATE_DIR || null;
+const _windowStateFile = () => (_stateDir ? join(_stateDir, 'window-state.json') : null);
+
+/** 宿主声明破窗态的落盘目录（宿主可达范围之外 ⇒ 重装/重启用清不掉它）。
+ *  传 null ⇒ 回到「仅内存」（默认）。声明后须重启进程才生效（状态在加载时读回）。 */
+export function declareWindowStateDir(dir) {
+  _stateDir = typeof dir === 'string' && dir.trim() ? dir.trim() : (process.env.WEIWEN_LAW_STATE_DIR || null);
+  return _stateDir;
+}
+
+/** 读数面用：当前持久化状态（宿主是否声明了落盘位置）。 */
+export function windowStatePersistence() {
+  return { declared: !!_stateDir, dir: _stateDir, file: _windowStateFile(),
+    note: _stateDir
+      ? '破窗态持久化已启用（宿主声明的目录 ⇒ 重装/重启用清不掉它）'
+      : '🔴 破窗态**仅内存**（宿主未声明落盘位置）⇒ 重装/重启即清 ⇒ 拦截强度受限；要持久化请宿主调 declareWindowStateDir(dir)' };
+}
+
+function readWindowState() {
+  const file = _windowStateFile();
+  if (!file) return null;
+  try {
+    if (!existsSync(file)) return null;
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch { return null; }
+}
+
+// 摘要：单调计数 + 内容 ⇒ 可校验（②）。hash 覆盖关键字段 ⇒ 半截写入/篡改会被检出。
+function windowStateDigest(st) {
+  return createHash('sha256').update(JSON.stringify({ v: st.v, streak: st.streak, broken: st.broken, healedAt: st.healedAt ?? null })).digest('hex').slice(0, 16);
+}
+
+function persistWindowState(streak, broken) {
+  const file = _windowStateFile();
+  if (!file) return false;   // 未声明落盘位置 ⇒ 不写（默认仅内存；读数面明写）
+  try {
+    mkdirSync(_stateDir, { recursive: true });
+    const st = { v: 1, streak, broken: !!broken, healedAt: null, savedAt: new Date().toISOString() };
+    st.digest = windowStateDigest(st);
+    writeFileSync(file, JSON.stringify(st, null, 2), 'utf8');
+    return true;
+  } catch (e) {
+    logline(`window state persist failed: ${e?.message ?? e} ⇒ 落盘不可用（内存态仍有效，重装即清——已记在案）`);
+    return false;
+  }
+}
+
+// 启动时读回破窗态。**fail-closed**（③）：记录缺失 ≠ 状态干净——
+//   但「从来没破过窗」与「记录被删了」在读数面上同形 ⇒ 用一个旁证区分：
+//   若磁盘上**没有任何状态文件**但本次是**首次加载**⇒ 视为未破窗（正常起点）；
+//   若状态文件存在却损坏/校验不过 ⇒ 按破窗处理（fail-closed）。
+function restoreWindowState() {
+  const st = readWindowState();
+  if (!_stateDir) return { broken: false, streak: 0, source: 'memory-only',
+    note: '破窗态仅内存（宿主未声明落盘位置）⇒ 重装/重启即清' };
+  if (!st) return { broken: false, streak: 0, source: 'fresh', note: '无持久化破窗记录（首次加载）' };
+  const expect = windowStateDigest(st);
+  if (st.digest !== expect) {
+    return { broken: true, streak: st.streak ?? Number.MAX_SAFE_INTEGER, source: 'fail-closed',
+      note: '破窗态记录校验不过（半截写入/被篡改）⇒ 按破窗处理（fail-closed：记录缺失/损坏 ≠ 状态干净）' };
+  }
+  return { broken: !!st.broken, streak: st.streak ?? 0, source: 'restored',
+    note: `破窗态从宿主侧状态目录恢复（streak=${st.streak}）` };
+}
+
+// ---------- 身份层审计（actor 归因）----------
+// 每条裁决/复位都记：谁（executor/decider）、何时、依据什么。append-only、可回放。
+function recordActorAudit(kind, actor, detail) {
+  const rec = { at: new Date().toISOString(), kind, actor, detail: String(detail ?? '').slice(0, 200) };
+  _actorAudit.push(rec);
+  if (_actorAudit.length > 200) _actorAudit.shift();
+  logline(`actor audit: ${kind} by ${actor} — ${rec.detail}`);
+  return rec;
+}
+
+// 🔴 [2026-10-29 · 身份层（小D 45 号件第六节 · 安本轮的定义）] 复位权的**归属方**＝决策方（用户），
+//   不是执行方（被审的 AI）。⇒ `healBrokenWindow(note, actor)` 必须显式声明是谁在复位：
+//   · actor='decider'（决策方/用户确认）⇒ 允许复位，并写审计（谁清的、何时、依据什么）；
+//   · actor='executor'（执行方自复位）⇒ **拒绝复位**并留痕「越权复位」——
+//     同「被审对象不能给自己签授权」；这不是新发明，是把已有铁律用在本层。
+//   · 未声明 actor ⇒ fail-closed（按 executor 处理 ⇒ 拒绝），理由与 executor 同。
+export function healBrokenWindow(note, actor = ACTOR_EXECUTOR) {
   const at = new Date().toISOString();
   const text = typeof note === 'string' ? note.trim() : '';
+  if (actor !== ACTOR_DECIDER) {
+    const rec = { at, note: text || null, kind: 'heal-window-denied', actor, instances: _liveEngines.size,
+      wereBroken: 0, reason: '复位权在决策方，不在执行方——执行方（被审的 AI）不能给自己签复位' };
+    recordActorAudit('heal-denied', actor, `越权复位被拒：${rec.reason}`);
+    logline(`healBrokenWindow denied（actor=${actor}）— 复位权在决策方，不在执行方`);
+    return rec;
+  }
   let wereBroken = 0;
   for (const e of _liveEngines) {
     try {
@@ -507,10 +623,13 @@ export function healBrokenWindow(note) {
       e.healWindow();
     } catch { /* 单个实例异常不得拦住其余实例 */ }
   }
-  const rec = { at, note: text || null, kind: 'heal-window', instances: _liveEngines.size, wereBroken };
+  // 🔴 清零点写审计（④）+ 清持久化破窗态（否则下次加载又恢复成破窗 ⇒ 复位等于没做）。
+  persistWindowState(0, false);
+  recordActorAudit('heal', actor, `决策方确认复位（清零破窗态；实例=${_liveEngines.size}；曾破窗=${wereBroken}）`);
+  const rec = { at, note: text || null, kind: 'heal-window', actor, instances: _liveEngines.size, wereBroken };
   _windowHeals.push(rec);
   if (_windowHeals.length > 20) _windowHeals.shift();
-  logline(`healBrokenWindow(${text || '未给理由'}) — instances=${_liveEngines.size}, wereBroken=${wereBroken}`);
+  logline(`healBrokenWindow(${text || '未给理由'}) — actor=decider, instances=${_liveEngines.size}, wereBroken=${wereBroken}`);
   return rec;
 }
 
@@ -571,7 +690,24 @@ function apply(ctx) {
   const engine = new WeiwenLawEngine({
     rigidAnchors: DEFAULT_RIGID_ANCHORS,
     selfAuditTools: SELF_AUDIT_TOOL_NAMES,
+    // 🔴 [2026-10-29 · 状态层] 破窗态落盘挂在引擎的**唯一累加收口**上（引擎内 bumpFailureStreak）
+    //   ⇒ 覆盖**全部**路径（R 命中 / 推演 deny / 承诺违背 / H 越界 / M 停机 / 真实失败…）。
+    //   修前若在适配层逐路径插入 ⇒ 必漏一处 ⇒ 那条路径的破窗态不落盘 ⇒ 重装即清 ⇒ 拦截无效。
+    onStreakChange: (streak, broken) => {
+      persistWindowState(streak, broken || streak >= engine.maxFailureStreak);
+    },
   });
+  // 🔴 [2026-10-29 · 状态层（小D 45 号件第七节）] 破窗态从**宿主侧状态目录**恢复（插件目录之外 ⇒ 重装不清）。
+  //   他实测：破窗态在插件内存 ⇒ 卸载重装即清（failureStreak 5→0）⇒ 拦截无效。
+  //   恢复时若校验不过 ⇒ fail-closed（按破窗处理），不是当作干净。
+  const _restored = restoreWindowState();
+  if (_restored.streak > 0) engine.failureStreak = _restored.streak;
+  if (_restored.broken) {
+    engine.windowBroken = true;
+    logline(`window state restored: ${_restored.note}`);
+  } else if (_restored.source === 'restored') {
+    logline(`window state restored: ${_restored.note}`);
+  }
   // ── 担保提交入口的声明（可信侧）────────────────────────────────────
   // 为什么需要：`submit_pledge` 名字里没有动作词 ⇒ 归因判不出动作类别 ⇒ **"提交担保"这个动作自己会被拦**，
   //   形成"要担保先过闸、过闸又得先有担保"的死循环。实测：不声明 ⇒ review（对外映射成 deny）。
@@ -877,11 +1013,15 @@ function apply(ctx) {
           _reviewAlways.add(rk);   // 同类不再询问（记忆键＝裁决对象，不是全局）
           logline(`review verdict: ${out} ⇒ 同类（裁决对象 ${rk}）记入始终允许，后续不再询问`);
         }
+        // 🔴 [2026-10-29 · 身份层] 人点了按钮 ⇒ actor=**decider**（决策方＝用户）。
+        //   与「判据自动放行」（actor=executor）严格分开 ⇒ 「结果是谁造成的」在读数面读得出来。
+        recordActorAudit('grant', ACTOR_DECIDER, `放行一次（裁决对象 ${rk}；outcome=${out}）`);
         logline(`review verdict via approval: ${out} — 委托人放行这一次调用`);
         return 'allowed-once';
       }
       if (out === 'cancelled') {
         _reviewPending.add(rk);   // 待议：不记 S（人没裁决，无事实发生）⇒ 但留「未决」标记（否则读不出"这条路悬着"）
+        recordActorAudit('defer', ACTOR_DECIDER, `待议（显式挂起；裁决对象 ${rk}）`);
         // 【待议】请求被撤回/挂起：本轮不执行，但**不是拒绝** ⇒ 不进冷却（人没裁决，不该被当成拒绝）。
         // 与「不答」的区别：cancelled 是宿主/人显式挂起；unavailable 是无应答面（fail-closed）。
         logline('review approval cancelled → 待议：本轮不执行，留痕待复议（不计入冷却）');
@@ -889,6 +1029,7 @@ function apply(ctx) {
       }
       if (out === 'rejected') {
         _reviewRefused.set(rk, { at: Date.now(), note: String(decision.reason ?? '').slice(0, 80) });
+        recordActorAudit('refuse', ACTOR_DECIDER, `拒绝（裁决对象 ${rk}）`);
         // 🔴 [2026-10-29 · S 账与 approval 绑定（小D 38 号件）] 拒绝是一次**负向反馈** ⇒ 记负账
         //   （记账只增：只记「哪条链断了」，不减存量）。此前拒绝**不留任何痕**⇒ 被审方与账本都看不出
         //   「这条路被人走过又走不通」⇒ 拒绝会退化成噪音。⚠️ 待议**不记**（人没裁决，无事实发生），
@@ -906,12 +1047,17 @@ function apply(ctx) {
         logline('review approval rejected → 冷静期内**同类**询问不再打扰（仅此裁决对象，不牵连其他）');
         return 'rejected';
       }
+      // ⚠️ 不答/无服务 ⇒ actor=**none**（无人应答），**不是** decider（人点了拒绝）。
+      //   「没人」与「人拒绝」在读数面上必须分得开——否则「谁造成的」读不出来（小D 45 号第五节同源问题）。
+      recordActorAudit('no-answer', 'none', `无人应答（outcome=${out}；裁决对象 ${rk}）`);
       logline(`review approval outcome=${out} → 静默拒（fail-closed，与无人值守一致）`);
       return null;
     } catch (e) {
       // 超时撤问 ⇒ 宿主侧多半抛 abort 类错误 ⇒ 落成**待议**（不是拒绝、不进冷却），
       // 其余异常仍 fail-closed（无应答面 ≠ 人挂起）。
       if (e?.name === 'AbortError' || /abort/i.test(String(e?.message ?? ''))) {
+        // 超时撤问 ⇒ **没人答**（不是人显式挂起）⇒ actor=none，与 decider 的 cancelled 分开。
+        recordActorAudit('timeout-defer', 'none', `超时撤问（裁决对象 ${rk}）⇒ 待议`);
         logline('review approval aborted (timeout) → 待议：动作不执行，人不被冻住');
         return 'deferred';
       }
@@ -1209,6 +1355,7 @@ function apply(ctx) {
         logline(`result audit: error 由本层拦截产生（callId=${id}）⇒ 拦截成功，不计入破窗（streak=${engine.failureStreak}/${engine.maxFailureStreak}）`);
         return;
       }
+      // 落盘由 onStreakChange 钩子承担（引擎内唯一累加收口 ⇒ 覆盖全部路径，不在此重复）。
       engine.onFailure();
       logline(`result audit: failure accrued（streak=${engine.failureStreak}/${engine.maxFailureStreak}）`);
     }
@@ -1249,7 +1396,20 @@ function apply(ctx) {
         standbySize: engine.sStandby.length,
         traumaCount: engine.traumaCount,
         failureStreak: engine.failureStreak,
-        note: 'ledger=活动态（最新版本）；standby=静默待机（旧版本，append-only 保留不调用）。全量 historyTrail 仅供深度审计。⚠️ effectiveS 是**储备读数**（木桶最短板，下限 0：到 0 = 没有储备）；欠账看 overdraft（透支额）——负净值不装进储备（2026-10-29 按小D 39/40 号件修：见底与透支在因果上不同）。',
+        // 🔴 [2026-10-29 · 状态层] 破窗态读数（止损状态必须在读数面可见——否则「它在不在场」读不出来）
+        windowBroken: !!engine.windowBroken,
+        // 🔴 [2026-10-29 · 身份层] actor 归因读数面（小D 45 号第五节那条降级的正面解法）：
+        //   「判据自动放行」与「人批准」在他（和任何人）的观测面上同形 ⇒ 结论依赖「动作通过了」
+        //   就必须先问「是不是有人替它开过门」。⇒ 把 actor 显式摆出来。
+        actorAudit: _actorAudit.slice(-20),   // 最近若干条：谁（executor/decider/none）、何时、依据什么
+        actorCounts: {
+          decider: _actorAudit.filter((r) => r.actor === ACTOR_DECIDER).length,
+          executor: _actorAudit.filter((r) => r.actor === ACTOR_EXECUTOR).length,
+          none: _actorAudit.filter((r) => r.actor === 'none').length,
+        },
+        // 🔴 [2026-10-29 · 状态层] 持久化状态（宿主是否声明了落盘位置）——不假装已持久化。
+        windowState: windowStatePersistence(),
+        note: 'ledger=活动态（最新版本）；standby=静默待机（旧版本，append-only 保留不调用）。全量 historyTrail 仅供深度审计。⚠️ effectiveS 是**储备读数**（木桶最短板，下限 0：到 0 = 没有储备）；欠账看 overdraft（透支额）——负净值不装进储备（2026-10-29 按小D 39/40 号件修：见底与透支在因果上不同）。⚠️ actorAudit 区分「判据自动放行（executor）」「人批准（decider）」「无人应答（none）」——凡结论依赖「动作通过了」，先看是谁开的门。',
       };
     },
   }));
