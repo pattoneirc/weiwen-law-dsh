@@ -1386,6 +1386,14 @@ export class WeiwenLawEngine {
     //   ⇒ 结构修法：**累加只走 bumpFailureStreak() 一个入口**，钩子在这里挂一次 ⇒ 覆盖全部路径。
     //   ⚠️ 钩子只观察、不改写（IO 留在适配层；引擎保持纯逻辑）。
     this.onStreakChange = opts.onStreakChange ?? null;
+    // 🔴 [2026-10-30 · 账本落盘钩子（小D 48 号件第一条）] 账本落盘挂在**记账的唯一收口**
+    //   （recordSteady）上 ⇒ 覆盖全部路径（裁决落账 / 失败进账 / 外传记账 / 闭环正账…）。
+    //   ⚠️ 与破窗态同款做法：**观察钩子挂一次**，逐路径插必漏一处（0.3.8 的教训）。
+    //   ⚠️ 钩子只观察、不改写（IO 留在适配层；引擎保持纯逻辑）。
+    this.onLedgerChange = opts.onLedgerChange ?? null;
+    // 🔴 [2026-10-30 · 空账≠新账（小D 48 号件第二条）] 恢复校验不过 ⇒ 记账**降级只读**：
+    //   不再往空账上追加（否则「清零」被伪装成「全新开始」）。由适配层在恢复 fail-closed 时置位。
+    this.ledgerWriteLocked = false;
     // 
     // 不纠结阈值、不纠结"触发几次锁死"——拦截即标记，标记累计到封顶即转人工，AI 不再耗算力纠结。
     //   mBugForce   ：同一 BUG（bugKey 稳定身份）被拒不修复、反复硬闯的累计标记数 → 达封顶转人工（flow1）
@@ -1451,9 +1459,15 @@ export class WeiwenLawEngine {
     // [2026-09-20 · 2026-09-24 同构回填] S 账本（用户账本模型）：R=字典 / SD=轴标记 / term 字典序索引 / S≠R 异类 / 疤窗可逆性。
     // 仅附加记录结构，不参与裁决判定（守"禁区"红线：不做全局强制自检）。
     this.sAccount = opts.sAccount ?? new SAccountLedger();
+    // 🔴 [2026-10-30 · 沉淀步接线声明（小D 48 号件第四节）] 「闭环成功 ⇒ 记正账（S+1）」这条线**接没接**，
+    //   由**引擎自己答**（读数面不猜、不替引擎判断——与元判据同原则）。
+    //   ⚠️ 现在是 **false**：recordSteady 的 `positive>0` 分支**无任何调用点**（放行路径 2026-09-24
+    //     起明写「不再记 positive」⇒ 放行 ≠ 增益；而「闭环成功」这条正账入口尚未接进记账）
+    //     ⇒ `sMSediment` 的 0 是**静默的 0**（读起来像「暂时没有」，实际是「这一步从来没跑过」）。
+    //   ⇒ 读数面据此报「沉淀停摆（原因：M 未接线）」，**不报 0**（unknown ≠ 零）。
+    this.mSedimentWired = false;
     // [2026-09-20 · 锚池（痕锚归属用）· 同构回填] 授权锚＝**委托人已声明的**对象/作用域，本会话内累积。
-    //   锚 = 已声明（不是"已做过"）；纯读入、不参与别的判定。
-    //   ⚠️ 来源纪律（2026-09-20 锚源定案）：锚**只有一个来源**＝委托人在结构边界声明的任务范围
+    //   锚 = 已声明（不是"已做过"）；纯读入、不参与别的判定。    //   ⚠️ 来源纪律（2026-09-20 锚源定案）：锚**只有一个来源**＝委托人在结构边界声明的任务范围
     //     （`call.taskAnchor`，由适配层 setPrincipalScope 供入）。判据里的两档是**抽法的两档**：
     //     路径锚（作用域包含）/ 类别锚（对象类别同类）—— 不是"言锚 + 任务锚"两个来源。
     //     ⚠️ 池反映**当前有效范围**（**替换**语义，非只增刻痕）：每次裁决按当前声明重建，见 _decideCore。
@@ -1479,6 +1493,15 @@ export class WeiwenLawEngine {
   //   - trauma 为历史刻痕记录（绝对值），不回退当前值。
   // 注意：真实路径为 M → H₀ 分流 → S₀(+1) 或 |S₀(S₀-1)|（见 law.mjs 的 FEEDBACK_LOOP）。
   recordSteady({ positive = 0, negative = 0, trauma = 0, subsystem = 'core', topic = null, detail = null, action = null, attrib = null, executed = false } = {}) {
+    // 🔴 [2026-10-30 · 空账≠新账（小D 48 号件第二条）] 记账**降级只读**时（ledgerWriteLocked）：
+    //   恢复校验不过 ⇒ 磁盘上的账已被判定「清空/篡改」⇒ 若继续记账，就等于把「清零」
+    //   **伪装成「全新开始」**（小D 原话：「清零必须是一次可审计的事件，不能是"进程结束"的副作用」）。
+    //   ⇒ 锁住 ⇒ 本次**不落账**，如实返回当前快照（读数面能看到「记不进去了」这件事）。
+    //   ⚠️ 锁**不删已有刻痕**（铁律 #13：记忆 ≡ S ⇒ 无删除态）——只停止追加。
+    if (this.ledgerWriteLocked) {
+      this._settleMarked = true;
+      return this.snapshot();
+    }
     // 🔴 [2026-10-29 · 序列化加固（小D 39 号件实测：账本条目从 0 变 7 后 query_steady_state 开始吐
     //   「invalid output: value is not lossless JSON」）] 账本条目必须是**纯可序列化数据**：
     //   detail/action 若传对象（attrib 之类）会把不可序列化值带进条目 ⇒ 整个读数面挂掉。
@@ -1517,9 +1540,16 @@ export class WeiwenLawEngine {
     else { sign = '0'; delta = 0; }
     this.sBySubsystem[subsystem] = sub + delta;
     // 原始刻痕（append-only 全量）：所有事件只沉淀不消解，供深度审计
-    if (positive > 0) this.historyTrail.push({ type: 'S+1', subsystem, amount: positive, topic, detail });
-    if (negative > 0) this.historyTrail.push({ type: '|S-1|', subsystem, amount: Math.abs(negative), topic, detail });
-    if (trauma > 0) { this.traumaCount += 1; this.historyTrail.push({ type: 'trauma', subsystem, amount: Math.abs(trauma), topic, detail }); }
+    // 🔴 [2026-10-30 · 覆盖率口径（小D 47 号件第二节）] 本次是否留痕：**在两本账之间对齐的唯一位置**
+    //   —— 只有引擎在这里同时握着 historyTrail 与 rStore ⇒ 只有它能判「这一笔在 trail 里有没有痕」。
+    //   ⚠️ 口径（与 0.4.0 的取数口纪律同源）：分子分母必须**同量纲** ⇒ 覆盖率分母＝事件数，
+    //     分子＝**留了痕的事件数**（不是刻痕条数）⇒ 比值恒在 [0,1]，且 <1 才是真的漏记。
+    //   ⚠️ 一笔事件可能留**多条**刻痕（negative 与 trauma 同时 >0 ⇒ 推 |S-1| 与 trauma 两条）⇒
+    //     这正是修前比值会 >1 的机制（分子数的是刻痕条，分母数的是事件条）。
+    let trailMarked = false;
+    if (positive > 0) { this.historyTrail.push({ type: 'S+1', subsystem, amount: positive, topic, detail }); trailMarked = true; }
+    if (negative > 0) { this.historyTrail.push({ type: '|S-1|', subsystem, amount: Math.abs(negative), topic, detail }); trailMarked = true; }
+    if (trauma > 0) { this.traumaCount += 1; this.historyTrail.push({ type: 'trauma', subsystem, amount: Math.abs(trauma), topic, detail }); trailMarked = true; }
 
     // S 时间周期模型：同类事件只保留最新版本为活动态，旧版本沉入 silent standby；
     //   +1/-1 累加成 +N/-N 标记"发生了几次"（事件标记，非算术）。解决 S 长期增厚导致上下文过载。
@@ -1540,7 +1570,13 @@ export class WeiwenLawEngine {
     const rDomains = rDomainsForLayer(attrib?.layer ?? attrib?.layers ?? null);
     // [2026-09-20 · 洞③] action 一并沉入刻痕（原始动作 ⇒ 事后可溯）；可选，未传则留 null。
     //   只记 sign/term 而丢掉动作 ⇒ 事后读不出"当时做了什么"（实测 detail=null）。
-    this.sAccount.record({ term, sign, rDomains, reversible: rev0.reversible, overwrite: rev0.overwrite, action, detail, subsystem, t: ts });
+    this.sAccount.record({ term, sign, rDomains, reversible: rev0.reversible, overwrite: rev0.overwrite, action, detail, subsystem, trailMarked, t: ts });
+    // 🔴 [2026-10-30 · 账本落盘钩子] 记账的唯一收口 ⇒ 覆盖全部路径。
+    //   ⚠️ ledgerWriteLocked（恢复 fail-closed 时置位）⇒ 记账降级只读：不再往空账上追加。
+    //   ⚠️ 钩子只观察、不改写（IO 留在适配层）；钩子失败**不得拦住判定**（同 onStreakChange 的纪律）。
+    if (!this.ledgerWriteLocked) {
+      try { this.onLedgerChange?.(this.exportLedger()); } catch { /* 钩子失败不得拦住记账/判定 */ }
+    }
     return this.snapshot();
   }
 
@@ -1553,7 +1589,15 @@ export class WeiwenLawEngine {
       if (detail) prev.latest = detail;
       prev.lastTs = ts;
     } else {
-      this.sLedger.set(cls, { class: cls, sign: signLabel, detail: detail || null, count: 1, firstTs: ts, lastTs: ts });
+      // 🔴 [2026-10-30 · 序列化真凶（小D 47 号件第七节 / 48 号件第五条的复现）]
+      //   修前这里写的是 `detail: detail || null`（键名 **detail**），而 steadyLedger() 读的是 `v.latest`
+      //   ⇒ **键名对不上 ⇒ v.latest 恒为 undefined** ⇒ JSON 化时这个键被**静默丢掉**
+      //   ⇒ 宿主判「value is not lossless JSON」⇒ **一有账本条目就坏、账本归 0 就恢复**。
+      //   （小D 报的"三次同一形状"由此解释：0.3.5 那次修的是 recordSteady 入口的 detail/action，
+      //     漏了 _coalesce 这条路径 ⇒ 同一形状复发三次。）
+      //   ⇒ 修法：键名对齐为 `latest`（steadyLedger 读的那个），并且**不允许 undefined 进读数面**
+      //     （无内容就写 null —— JSON 里 null 是"有值且为空"，undefined 是"没这个键"＝丢值）。
+      this.sLedger.set(cls, { class: cls, sign: signLabel, latest: detail || null, count: 1, firstTs: ts, lastTs: ts });
     }
   }
 
@@ -1583,6 +1627,105 @@ export class WeiwenLawEngine {
   /** 透支额：各子系统负净值之和（"欠了多少"）。与储备读数分开——欠账不装进"还剩一点"。 */
   overdraft() {
     return Object.values(this.sBySubsystem).reduce((a, v) => a + (v < 0 ? -v : 0), 0);
+  }
+
+  // ---------- 账本落盘载体（小D 48 号件第一/三条 · 2026-10-30）----------
+  // 🔴 病根（他的实测，独立复核成立）：账本只在**插件内存** ⇒ 重启/重装即清
+  //   （实测 failureStreak 5→0、traumaCount 6→0、ledgerSize 18→0、windowBroken false）
+  //   ⇒ 与 framework law.mjs S 的定义第一条直接冲突：「所有发生过的事**不可改变或移除**……
+  //   **历史刻痕不可逆（不可消解）**」——「一重启就消解」与「不可消解」不能同时成立。
+  // ⇒ 连带后果（他推的，我核过成立）：ΣS 每次重启归零 ⇒ 永远攒不到 R₀ ⇒ **R 永远跃迁不了**
+  //   （手稿：「当 ΣS > R₀，则 R₀₊₁ = R₁」⇒ 换不了规）。
+  //
+  // ⚠️ 落法边界（三条，守住不越界）：
+  //   ① **落盘位置由宿主声明**（同破窗态：`declareWindowStateDir(dir)`）⇒ 插件不擅自往用户家目录写。
+  //      ⚠️ 小D 48 号第一节提「位置由**决策方**声明（不是由执行方声明——否则等于被约束方自己选锁的位置）」——
+  //      这条**方向对但落法要分开**：宿主（部署者）声明 = 部署配置；**执行方**（被审的 AI）能改的只有
+  //      **它自己写进账本的内容**，不能改落盘位置 ⇒ 位置由部署侧定、内容由执行方写 ⇒ 两者不可互相越权。
+  //   ② **账本与破窗态同层**（小D 第 3 条）⇒ 同一个目录、同一套 fail-closed 恢复。
+  //   ③ **空账 ≠ 新账**（小D 第 2 条，见 restoreLedger 的 fail-closed 判据）。
+  //
+  // 📤 导出：全量账本状态（可 JSON 化，纯数据）。
+  exportLedger() {
+    return {
+      v: 1,
+      savedAt: new Date().toISOString(),
+      bySubsystem: { ...this.sBySubsystem },
+      traumaCount: this.traumaCount,
+      failureStreak: this.failureStreak,
+      windowBroken: !!this.windowBroken,
+      historyTrail: this.historyTrail.map((e) => ({ ...e })),
+      ledger: [...this.sLedger.values()].map((v) => ({ ...v })),
+      standby: this.sStandby.map((v) => ({ ...v })),
+      store: this.sAccount.rStore.map((r) => ({ ...r })),
+      catalog: [...this.sAccount.catalog.entries()].map(([k, list]) => [k, list.map((r) => ({ ...r }))]),
+      seq: this.sAccount._seq,
+      mHumanCap: this.mHumanCap,
+      mBugForce: Object.fromEntries(this.mBugForce),
+      mInterceptMarks: Object.fromEntries(this.mInterceptMarks),
+      mSystemMarks: Object.fromEntries(this.mSystemMarks),
+      mMagnitude: Object.fromEntries(this.mMagnitude),
+    };
+  }
+
+  // 📥 恢复：把落盘的账本读回引擎。
+  // ⚠️ **只加不减**（铁律 #13「记忆 ≡ S ⇒ 无删除态」）：恢复只**追加/覆盖计数**，
+  //   不清空任何已在本地的刻痕（本地有的磁盘没有 ⇒ 保留本地的，不丢）。
+  restoreLedger(data) {
+    if (!data || typeof data !== 'object') return { ok: false, reason: 'no_data' };
+    const d = data;
+    // S 刻痕（append-only）：只追加，不覆盖 ⇒ 已在本地的同 seq 条目跳过。
+    const seen = new Set(this.sAccount.rStore.map((r) => r.seq));
+    let added = 0;
+    for (const r of (d.store ?? [])) {
+      if (!r || typeof r !== 'object') continue;
+      if (seen.has(r.seq)) continue;
+      const rec = this.sAccount.record({
+        term: r.term, sign: r.sign, rDomains: r.rDomains, reversible: r.reversible,
+        overwrite: r.overwrite, action: r.action, detail: r.detail, subsystem: r.subsystem,
+        trailMarked: r.trailMarked, t: r.t,
+      });
+      // record() 会重新分配 seq ⇒ 恢复原 seq（append-only 要求序位稳定）。
+      rec.seq = r.seq;
+      seen.add(r.seq);
+      added += 1;
+    }
+    if (Number.isFinite(d.seq) && d.seq > this.sAccount._seq) this.sAccount._seq = d.seq;
+    // historyTrail：只追加（append-only）。
+    const tSeen = new Set(this.historyTrail.map((e) => e.ts));
+    for (const e of (d.historyTrail ?? [])) {
+      if (!e || typeof e !== 'object') continue;
+      if (tSeen.has(e.ts)) continue;
+      this.historyTrail.push({ ...e });
+      tSeen.add(e.ts);
+    }
+    // 活动态/静默待机账。
+    for (const v of (d.ledger ?? [])) {
+      if (!v || !v.class) continue;
+      const prev = this.sLedger.get(v.class);
+      if (!prev || (v.lastTs ?? 0) > (prev.lastTs ?? 0)) {
+        this.sLedger.set(v.class, { ...v });
+      }
+    }
+    for (const v of (d.standby ?? [])) {
+      if (!v || !v.class) continue;
+      this.sStandby.push({ ...v });
+    }
+    // 各子系统净值：**取绝对值更大的那一个**（两边都可能是真的 ⇒ 不做加法，避免双计）。
+    for (const [k, v] of Object.entries(d.bySubsystem ?? {})) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+      const cur = this.sBySubsystem[k] ?? 0;
+      this.sBySubsystem[k] = Math.abs(v) > Math.abs(cur) ? v : cur;
+    }
+    if (Number.isFinite(d.traumaCount)) this.traumaCount = Math.max(this.traumaCount, d.traumaCount);
+    if (Number.isFinite(d.failureStreak)) this.failureStreak = Math.max(this.failureStreak, d.failureStreak);
+    if (d.windowBroken === true) this.windowBroken = true;
+    if (Number.isFinite(d.mHumanCap)) this.mHumanCap = d.mHumanCap;
+    for (const [k, v] of Object.entries(d.mBugForce ?? {})) this.mBugForce.set(k, v);
+    for (const [k, v] of Object.entries(d.mInterceptMarks ?? {})) this.mInterceptMarks.set(k, v);
+    for (const [k, v] of Object.entries(d.mSystemMarks ?? {})) this.mSystemMarks.set(k, v);
+    for (const [k, v] of Object.entries(d.mMagnitude ?? {})) this.mMagnitude.set(k, v);
+    return { ok: true, added, source: 'restored' };
   }
 
   snapshot() {
