@@ -851,7 +851,7 @@ function apply(ctx) {
           //   ⚠️ 宿主面板不支持折叠控件 ⇒ 能做的是**不贴整段原文**（证据留在 runtime.log 白箱里），
           //     并附同类计数（重复本身会加速"看开头就点"）。
           `【唯稳律 · 待裁】${riskLine}（这是授权请求，不是通知）`,
-          `谁批谁担：本条判定归你，不归 AI（已记 approval/asked）；本会话第 ${askCount} 次同类询问。`,
+          `谁批谁担：本条判定归你，不归 AI（决定记为 approval/asked + approval/decided 审计对，可回放）；本会话第 ${askCount} 次同类询问。`,
           `▸ 详情：${detailLine}`,
           '（完整判据原文见 runtime.log 白箱记录）',
           '· 允许一次：只放行这一次。',
