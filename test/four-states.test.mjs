@@ -36,17 +36,31 @@ test('态① 同意一次（allowed-once）：放行这一次，下次同类仍�
   assert.equal(asks.length, 2, '同意一次 ≠ 永久：第二次同类仍须再问');
 });
 
-test('态② 始终同意（outcome=always）：同类不再询问，且可撤销', async () => {
+test('🔴 始终同意在当前宿主下**不可达**：宿主把非词表值归一为 unavailable（契约原文），记忆不得生效', async () => {
   setPrincipalScope(null);
   clearReviewMemory();
+  // 模拟**真实宿主行为**：非词表 outcome（always/session）被归一为 'unavailable'。
+  const { ctx, handlers, asks } = mockCtx(['normalized-unavailable', 'allowed-once']);
+  apply(ctx);
+  await handlers['tools/pre-execute'](REVIEW(), next);
+  assert.equal(asks.length, 1, '宿主归一为 unavailable ⇒ 这次不算授权（fail-closed）');
+  const o2 = await handlers['tools/pre-execute'](REVIEW(), next);
+  assert.equal(asks.length, 2, '始终同意不可达 ⇒ 同类必须照问（不得静默沿用）');
+  assert.equal(o2, 'NEXT');
+});
+
+test('扩展位：若宿主扩展词表（outcome=always），同类不再询问，且可撤销', async () => {
+  setPrincipalScope(null);
+  clearReviewMemory();
+  // 注意：这条走的是**宿主尚未提供**的 outcome（mock 直给 always）⇒ 它锁的是"扩展位一触发就生效"，
+  //   不是"当前宿主支持"——当前宿主会把 always 归一为 unavailable（见上一条）。
   const { ctx, handlers, asks } = mockCtx(['always', 'always']);
   apply(ctx);
   await handlers['tools/pre-execute'](REVIEW(), next);
   assert.equal(asks.length, 1);
   const o2 = await handlers['tools/pre-execute'](REVIEW(), next);
-  assert.equal(o2, 'NEXT', '同类沿用始终允许');
-  assert.equal(asks.length, 1, '始终同意 ⇒ 同类不再询问（第四态的效果面）');
-  // 可撤销：撤销后必须重新问
+  assert.equal(o2, 'NEXT', '扩展位一旦触发 ⇒ 同类沿用');
+  assert.equal(asks.length, 1, '扩展位生效时同类不再询问');
   assert.ok(clearReviewMemory() >= 1, '始终允许必须可撤销');
   await handlers['tools/pre-execute'](REVIEW(), next);
   assert.equal(asks.length, 2, '撤销后同类恢复询问');
