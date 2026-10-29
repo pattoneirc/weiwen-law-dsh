@@ -102,11 +102,35 @@ export const STRATA = [
     quantities: [
       {
         key: 'sHistoryThickness',
-        label: 'ΣS（历史厚度）',
-        expr: 'count(sAccount.rStore)  // 单位＝离散事件数',
+        label: 'ΣS（历史厚度·会计口径＝离散事件数）',
+        expr: 'count(sAccount.rStore)  // 单位＝离散事件数（**流水口径**）',
         status: QSTAT.OK,
         dim: '时间维度·只增',
-        note: '伤疤也计入厚度 —— 这是「记账只增」的应有之义，但**不代表稳态变好**。🔴 取自全量账（rStore），不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。',
+        note: '伤疤也计入厚度 —— 这是「记账只增」的应有之义，但**不代表稳态变好**。🔴 取自全量账（rStore），不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。🔴 2026-10-29（小D 41 号件）：这个取数口数的是**事件数（流水）**，连 sign=unknown 的事件（H 一笔没付）也计入 ⇒ 会计账混进财务账；**财务口径请看 sSettledThickness**。',
+      },
+      {
+        key: 'sSettledThickness',
+        label: 'ΣS 沉淀厚度（财务口径＝有方向的刻痕数）',
+        expr: 'count(rStore where sign ∈ {+,−})  // 单位＝有依据的稳态变化数',
+        status: QSTAT.OK,
+        dim: '时间维度·只增',
+        note: '🔴 2026-10-29（按安 10-29 的财务/会计之分落）：S ＝ 财务账（沉淀），流水 ＝ 会计账（S 外部暂时挂载）。⇒ 沉淀厚度只数**有方向**的刻痕（sign ∈ {+,−}）；unknown / 中性事件只进事件数，不进沉淀。⚠️ 距离安的原话还差一格：「H 有没有支付」的载体尚未建成 ⇒ 现以「有方向」作代理（已如实标注）。',
+      },
+      {
+        key: 'sEventCount',
+        label: '事件数（会计口径＝全部离散事件）',
+        expr: 'count(sAccount.rStore)  // 单位＝离散事件数（含 unknown / 中性）',
+        status: QSTAT.OK,
+        dim: '时间维度·只增',
+        note: '流水口径的显式命名（与 sHistoryThickness 同值、不同名）—— 读数面上把「会计」与「财务」两个数摆开，别混读。',
+      },
+      {
+        key: 'sOverdraft',
+        label: '透支额（欠了多少）',
+        expr: 'Σ max(0, −net_subsystem)  // 与储备读数分开',
+        status: QSTAT.OK,
+        dim: '欠账方向',
+        note: '🔴 2026-10-29（小D 39/40 号件）：见底（储备为 0）与透支（欠账）在因果上不同 ⇒ 欠账单列，不装进储备。',
       },
       {
         key: 'sNow',
@@ -340,20 +364,36 @@ export function dataSurface(engine) {
   const subs = engine.sBySubsystem && typeof engine.sBySubsystem === 'object' ? engine.sBySubsystem : {};
   const store = arr(engine.sAccount && engine.sAccount.rStore);
 
-  // ΣS ＝ 历史刻痕总厚度，单位＝**离散事件数**（S 的「1」＝一次独立事件，见 law.mjs S_REFINEMENT）。
-  //   🔴 从 sAccount.rStore（全量账）取，不从 historyTrail 取 —— 后者漏 scar 推导路径（见文件头实测）。
-  const thickness = store.length;
+  // 🔴 [2026-10-29 · 财务/会计分读（小D 41 号件：ΣS 的取数口是"流水"不是"锚点"）]
+  //   修前 thickness = store.length（**全部离散事件数**）⇒ 连 sign=unknown 的事件（H 一笔都没付）也涨
+  //   「厚度」⇒ **会计账（流水）直接混进了财务账（S）**。安的裁定：「流水账只能算 S 外部暂时挂载的
+  //   会计账本；能不能进入 S 这个财务账，需要看 H 有没有支付动作。」
+  //   ⇒ 落法＝**两个读数分开摆**（不擅自改「S 的『1』＝一次独立事件」这条框架原文，只把混在一起的两个数分开）：
+  //     · settledThickness ＝ **沉淀厚度（财务口径）**＝ 有方向（sign ∈ {+,−}）的刻痕数 ＝ H 付过载重的那些；
+  //     · eventCount / thickness ＝ **事件数（会计口径）**＝ 全部离散事件（含 unknown / 中性）——流水。
+  //   ⚠️ 距离安的原话还差**一格**：「H 有没有支付」的载体尚未建成（40 号件第三点待判据）⇒ 现在用
+  //   「有方向」作代理（sign 有方向 ⇔ 该刻痕有依据的稳态变化），并**如实标注这是代理**。
+  const thickness = store.length;          // 会计口径：离散事件数（流水）
   const trailEvents = trail.length;
   const trailCoverage = store.length ? trailEvents / store.length : null;
   const positives = trail.filter((e) => e && e.type === 'S+1').length;
   const negatives = trail.filter((e) => e && (e.type === '|S-1|' || e.type === 'trauma')).length;
   const subVals = Object.values(subs).map(num).filter((v) => v !== null);
-  const sNow = subVals.length ? Math.min(...subVals) : 0;
+  // 🔴 sNow 与 engine.effectiveS **同源**（修前此处自己又算了一遍 min(净值) ⇒ 允许负值 ⇒ 与 0.3.5 的
+  //   储备读数口径分裂：引擎说 0、这里说 −1）。⇒ 一律取 engine 的读数（含下限 0 与 overdraft）。
+  const sNow = typeof engine.effectiveS === 'function' ? engine.effectiveS()
+    : (subVals.length ? Math.max(0, Math.min(...subVals)) : 0);
+  const sOverdraft = typeof engine.overdraft === 'function' ? engine.overdraft()
+    : subVals.reduce((a, v) => a + (v < 0 ? -v : 0), 0);
 
   const scar = store.filter((r) => r && r.reversible === 'scar').length;
   const unknown = store.filter((r) => r && r.reversible === 'unknown').length;
   const paid = store.filter((r) => r && (r.sign === '+' || r.sign === '-')).length;
   const total = store.length;
+  // 财务口径：有方向（sign ∈ {+,−}）的刻痕数 ＝ 沉淀（H 付过载重的那些；「有方向」是代理，标注在案）
+  const settledThickness = paid;
+  // 会计口径别名：全部离散事件（含 unknown / 中性）＝ 流水
+  const eventCount = total;
 
   // 落点集中度 ＝ **最大簇占比**（0–1），不是"总数/落点数"。
   //   后者在只有一个落点时会随事件数一路增长，量的是"发生了多少"而非"聚得多紧"。
@@ -367,7 +407,7 @@ export function dataSurface(engine) {
   const concentration = total ? maxCluster / total : null;
 
   return {
-    thickness, trailEvents, trailCoverage, positives, negatives, sNow,
+    thickness, settledThickness, eventCount, trailEvents, trailCoverage, positives, negatives, sNow, sOverdraft,
     traumaCount: num(engine.traumaCount) ?? 0,
     scar, unknown, paid, total, concentration, maxCluster,
     distinctDomains: domains.size,
@@ -385,6 +425,9 @@ export function compute(key, surface) {
   const s = surface;
   switch (key) {
     case 'sHistoryThickness': return s ? { status: QSTAT.OK, value: s.thickness } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sSettledThickness': return s ? { status: QSTAT.OK, value: s.settledThickness } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sEventCount': return s ? { status: QSTAT.OK, value: s.eventCount } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
+    case 'sOverdraft': return s ? { status: QSTAT.OK, value: s.sOverdraft } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sNow': return s ? { status: QSTAT.OK, value: s.sNow } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sPositive': return s ? { status: QSTAT.OK, value: s.positives } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };
     case 'sNegative': return s ? { status: QSTAT.OK, value: s.negatives } : { status: QSTAT.PENDING, value: null, evidence: '未接 engine 实例' };

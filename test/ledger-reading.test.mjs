@@ -57,3 +57,26 @@ test('中性刻痕不虚增储备（放行 ≠ 增益：sign=0 只留痕）', ()
   assert.equal(e.effectiveS(), 0, '中性刻痕不改储备');
   assert.equal(e.overdraft(), 0, '中性刻痕不产生透支');
 });
+
+// ── 0.3.6（小D 41 号件）：ΣS 的取数口是"流水"不是"锚点" —— 财务与会计两个读数必须分开 ──
+test('🔴 unknown 事件（H 一笔没付）只涨事件数，不涨沉淀厚度（会计账不得混进财务账）', async () => {
+  const { dataSurface } = await import('../src/core/strata.mjs');
+  const e = ENG();
+  e.recordSteady({ positive: 1, detail: '有方向', subsystem: 'probe' });
+  e.recordSteady({ negative: 1, detail: '有方向负', subsystem: 'probe' });
+  e.recordSteady({ executed: true, detail: 'unknown 事件（H 没付）', subsystem: 'probe' });
+  const d = dataSurface(e);
+  assert.equal(d.eventCount, 3, '会计口径：三条离散事件');
+  assert.equal(d.settledThickness, 2, '财务口径：只有有方向的两条算沉淀');
+  assert.equal(d.thickness, 3, 'thickness 保留事件数（会计口径），但名字与 note 已标明');
+});
+
+test('🔴 sNow 与引擎储备读数同源（不得一处 0 一处 −1）', async () => {
+  const { dataSurface } = await import('../src/core/strata.mjs');
+  const e = ENG();
+  e.recordSteady({ negative: 3, detail: '侵蚀', subsystem: 'probe' });
+  const d = dataSurface(e);
+  assert.equal(d.sNow, e.effectiveS(), 'sNow 必须与 engine.effectiveS 同源');
+  assert.ok(d.sNow >= 0, '储备读数不得为负');
+  assert.equal(d.sOverdraft, e.overdraft(), '透支额必须与 engine.overdraft 同源');
+});
