@@ -68,7 +68,10 @@ test('🔴 unknown 事件（H 一笔没付）只涨事件数，不涨沉淀厚�
   const d = dataSurface(e);
   assert.equal(d.eventCount, 3, '会计口径：三条离散事件');
   assert.equal(d.settledThickness, 2, '财务口径：只有有方向的两条算沉淀');
-  assert.equal(d.thickness, 3, 'thickness 保留事件数（会计口径），但名字与 note 已标明');
+  // [2026-10-29 · 扩容判据改用财务口径（安 43 号件原话）] thickness（对外的 ΣS）＝**结构锚点数**
+  //   ⇒ 扩容判据不再拿流水当 ΣS；流水计数在 eventCount。
+  assert.equal(d.thickness, 2, '对外的 ΣS（thickness）＝ 结构锚点数（财务口径）');
+  assert.equal(d.eventCount, 3, '流水计数在 eventCount（会计口径）');
 });
 
 test('🔴 sNow 与引擎储备读数同源（不得一处 0 一处 −1）', async () => {

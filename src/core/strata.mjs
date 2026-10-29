@@ -102,11 +102,11 @@ export const STRATA = [
     quantities: [
       {
         key: 'sHistoryThickness',
-        label: 'ΣS（历史厚度·会计口径＝离散事件数）',
-        expr: 'count(sAccount.rStore)  // 单位＝离散事件数（**流水口径**）',
+        label: 'ΣS（历史厚度·**财务口径＝结构锚点数**）',
+        expr: 'count(rStore where sign ∈ {+,−})  // 单位＝结构锚点数（**财务口径**）',
         status: QSTAT.OK,
         dim: '时间维度·只增',
-        note: '伤疤也计入厚度 —— 这是「记账只增」的应有之义，但**不代表稳态变好**。🔴 取自全量账（rStore），不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。🔴 2026-10-29（小D 41 号件）：这个取数口数的是**事件数（流水）**，连 sign=unknown 的事件（H 一笔没付）也计入 ⇒ 会计账混进财务账；**财务口径请看 sSettledThickness**。',
+        note: '伤疤也计入厚度 —— 这是「记账只增」的应有之义，但**不代表稳态变好**。🔴 取自全量账（rStore），不取 historyTrail：后者漏 scar 推导路径（实测 4 笔只留 2 条）。🔴 2026-10-29（安 43 号件原话＋小D 41 号件）：这个取数口原来数的是**事件数（流水）**，连 sign=unknown 的事件（H 一笔没付）也计入 ⇒ 会计账混进财务账、扩容判据拿流水当 ΣS。⇒ 现改为**结构锚点数**（财务口径）；流水计数见 sEventCount。',
       },
       {
         key: 'sSettledThickness',
@@ -364,16 +364,6 @@ export function dataSurface(engine) {
   const subs = engine.sBySubsystem && typeof engine.sBySubsystem === 'object' ? engine.sBySubsystem : {};
   const store = arr(engine.sAccount && engine.sAccount.rStore);
 
-  // 🔴 [2026-10-29 · 财务/会计分读（小D 41 号件：ΣS 的取数口是"流水"不是"锚点"）]
-  //   修前 thickness = store.length（**全部离散事件数**）⇒ 连 sign=unknown 的事件（H 一笔都没付）也涨
-  //   「厚度」⇒ **会计账（流水）直接混进了财务账（S）**。安的裁定：「流水账只能算 S 外部暂时挂载的
-  //   会计账本；能不能进入 S 这个财务账，需要看 H 有没有支付动作。」
-  //   ⇒ 落法＝**两个读数分开摆**（不擅自改「S 的『1』＝一次独立事件」这条框架原文，只把混在一起的两个数分开）：
-  //     · settledThickness ＝ **沉淀厚度（财务口径）**＝ 有方向（sign ∈ {+,−}）的刻痕数 ＝ H 付过载重的那些；
-  //     · eventCount / thickness ＝ **事件数（会计口径）**＝ 全部离散事件（含 unknown / 中性）——流水。
-  //   ⚠️ 距离安的原话还差**一格**：「H 有没有支付」的载体尚未建成（40 号件第三点待判据）⇒ 现在用
-  //   「有方向」作代理（sign 有方向 ⇔ 该刻痕有依据的稳态变化），并**如实标注这是代理**。
-  const thickness = store.length;          // 会计口径：离散事件数（流水）
   const trailEvents = trail.length;
   const trailCoverage = store.length ? trailEvents / store.length : null;
   const positives = trail.filter((e) => e && e.type === 'S+1').length;
@@ -392,6 +382,24 @@ export function dataSurface(engine) {
   const total = store.length;
   // 财务口径：有方向（sign ∈ {+,−}）的刻痕数 ＝ 沉淀（H 付过载重的那些；「有方向」是代理，标注在案）
   const settledThickness = paid;
+  // 🔴 [2026-10-29 · 财务/会计分读（小D 41 号件：ΣS 的取数口是"流水"不是"锚点"）]
+  //   修前 thickness = store.length（**全部离散事件数**）⇒ 连 sign=unknown 的事件（H 一笔都没付）也涨
+  //   「厚度」⇒ **会计账（流水）直接混进了财务账（S）**。安的裁定：「流水账只能算 S 外部暂时挂载的
+  //   会计账本；能不能进入 S 这个财务账，需要看 H 有没有支付动作。」
+  //   ⇒ 落法＝**两个读数分开摆**（不擅自改「S 的『1』＝一次独立事件」这条框架原文，只把混在一起的两个数分开）：
+  //     · settledThickness ＝ **沉淀厚度（财务口径）**＝ 有方向（sign ∈ {+,−}）的刻痕数 ＝ H 付过载重的那些；
+  //     · eventCount / thickness ＝ **事件数（会计口径）**＝ 全部离散事件（含 unknown / 中性）——流水。
+  //   ⚠️ 距离安的原话还差**一格**：「H 有没有支付」的载体尚未建成（40 号件第三点待判据）⇒ 现在用
+  //   「有方向」作代理（sign 有方向 ⇔ 该刻痕有依据的稳态变化），并**如实标注这是代理**。
+  // 🔴 [2026-10-29 · 扩容判据改用财务口径（安 10-29 原话；小D 41/43 号件）]
+  //   修前 thickness = store.length（**离散事件数**）⇒ 扩容判据（R_EXPANSION）拿**流水**当 ΣS
+  //   ⇒ 「没有能量的东西被算进了能量账」。安的原话：「+S ＝ 正向锚点，|−S| ＝ 负向锚点，因此
+  //   **正本 S 账本永不会成为负账**；S 需要符合系统的演化结构，而不是流水账」＋「直接分 2 套账：
+  //   S 的财务账记结构锚点，S 的会计账记流水计数」。
+  //   ⇒ **thickness（对外的 ΣS）＝ 锚点数（财务口径）**；流水计数另立 eventCount。
+  //   ⚠️ 与框架原文「S 的『1』＝一次独立事件」的关系：该原文说的是**事件单位**，而 ΣS 在扩容判据里
+  //   用的是**结构锚点**（安 43 号件引的原文：财务账记结构锚点）⇒ 两者分属两个账，不再共用一个取数口。
+  const thickness = settledThickness;     // 财务口径：结构锚点数（对外的 ΣS）
   // 会计口径别名：全部离散事件（含 unknown / 中性）＝ 流水
   const eventCount = total;
 

@@ -1427,6 +1427,10 @@ export class WeiwenLawEngine {
     // 本会话写盘登记表：放行的 write 记录 path→content，
     // 后续执行类 call 引用已登记路径时触发复核（refsSessionWritten）。只登记本会话写入，不猜文件系统。
     this.sessWritten = new Map();
+    // 🔴 [2026-10-29 · 落点可被后续动作改写（小D 42 号件：绕过链）] 写时打标：把「含危险形态的正文」
+    //   写到文档落点时留一条痕（不进判决，只留底）——因为**落点会变**：先写 .md（文档豁免）再改名成 .sh
+    //   ⇒ 磁盘上出现含删根命令的脚本，而两次动作都判过放行。判据锚在「写入那一刻的扩展名」是错的。
+    this.sessDanger = new Map();   // path → { danger:true, shape:'破坏性动词 × 危险作用域' }
     // 跨调用敏感源读取登记表（FRACTAL_PROPERTY 分形横向递归·同 R 域同构包含源与汇）：
     // 本会话读取的凭据/系统路径（敏感源）记入此 Set，供后续 sink 暴露调用按分形横向递归
     // 判定「源→汇」组合效应（保守 review，不 deny，防误伤）。只登记本会话读取，不猜文件系统。
@@ -2557,6 +2561,19 @@ export class WeiwenLawEngine {
       if (u.deny) { this.failureStreak += 1; return { kind: 'deny', law: 'R', reason: u.reason }; }
       return { kind: 'review', law: 'R', reason: u.reason };
     }
+    // 🔴 [2026-10-29 · 落点变更重判（小D 42 号件的绕过链）] 文档豁免只覆盖**写入那一刻**的落点，
+    //   而落点会被后续动作改写（先写 .md 再改名成 .sh）⇒ 每次改变落点都要重判。
+    //   判词：**危险内容 × 可执行落点** ⇒ review（问人）。打标口径与脚本必扫同源 ⇒ 相对路径清理不打标。
+    const relabel = this.checkDangerousRelabel(call);
+    if (relabel) {
+      this._mark('R', {
+        step: '落点变更重判 · 危险内容 × 可执行落点',
+        verdict: 'review',
+        cuts: true,
+        note: relabel.reason,
+      });
+      return { kind: 'review', law: 'R', reason: relabel.reason };
+    }
     // ═══ ② S 格：已有稳态容量基线 ═══（R 已划完边界 ⇒ 此处建立基线；D 以它作参照）
     const base = this._establishBaseline();
     this._mark('S', {
@@ -3099,6 +3116,63 @@ export class WeiwenLawEngine {
     const wPath = a.path ?? a.file ?? '';
     const wContent = a.content ?? a.data ?? '';
     if (wPath && typeof wContent === 'string') this.sessWritten.set(wPath, wContent);
+    // 🔴 [2026-10-29 · 写时打标（小D 42 号件的绕过链）] 打标口径＝**破坏性动词 ∧ 危险作用域**
+    //   （根 / 系统目录 / 伪文件系统）——与脚本落点必扫同一口径 ⇒ **相对路径清理构建产物不被打标**
+    //   （`rm -rf ./node_modules` 天天在做，不能误伤；小D 42 号件第四节自己点名要保护这条对照）。
+    if (wPath && typeof wContent === 'string' && wContent) {
+      // ⚠️ 判据用**文本形态**，不用 commandLayer：正文里的删除命令常被反引号包裹（`rm -rf /`），
+      //   而 commandLayer 的语法槽位会把引号内当**数据**剥掉 ⇒ 动词读不出来 ⇒ 打标不中（实测）。
+      const DESTRUCTIVE_VERB = /\b(rm|rmdir|shred|unlink|del|erase|rd|Remove-Item|Remove-ItemProperty)\b/i;
+      // 危险作用域：删除动词**之后**的一小段里出现根 / 系统目录 / 家目录 / 盘符根（相对路径不算）
+      const DANGER_SCOPE = /(?:^|\s)(?:\/[\s`'"*]|\/etc\/|\/usr\/|\/var\/|\/bin\/|\/boot\/|\/root\/|~\/|\/(?:dev|proc|sys)\/|[A-Za-z]:\\)/i;
+      const vm = DESTRUCTIVE_VERB.exec(wContent);
+      const dangerScope = !!vm && DANGER_SCOPE.test(wContent.slice(vm.index, vm.index + 160));
+      if (dangerScope) this.sessDanger.set(String(wPath), { danger: true, shape: '破坏性动词 × 危险作用域' });
+    }
+  }
+
+  // ---------- 落点变更重判（绕过链的对侧：小D 42 号件）----------
+  // 🔴 写时打标只解决「写的时候危险」；**落点会被后续动作改写**：写 .md（文档豁免）→ Move-Item 成 .sh
+  //   ⇒ 磁盘上出现含删根命令的脚本。⇒ **每一次改变落点的动作都要重判**：
+  //   源带 danger 标 ∧ 目标落点可执行 ⇒ **review**（问人，不是直接拒——「把文档里的示例抽成脚本」
+  //   本身可能是正当的工程动作；拦死不合适，问一句合适）。
+  checkDangerousRelabel(call) {
+    const args = call?.args ?? {};
+    // ① 动作形态：改名 / 移动 / 复制（工具名或命令形态；槽名与动词表都不穷举）
+    const act = `${call?.name ?? ''} ${Object.values(args).filter((v) => typeof v === 'string').join(' ')}`;
+    const isRelabel = /(rename|move|copy|\bmv\b|\bcp\b|Move-Item|Copy-Item|\bren\b)/i.test(act);
+    if (!isRelabel) return null;
+    // ② 源与目标：**从命令文本里抽路径 token**（args 里往往只有一个整条命令字符串 ⇒ 整体抽不出两个）
+    const rawStrings = Object.values(args).filter((v) => typeof v === 'string');
+    const pathish = [];
+    for (const raw of rawStrings) {
+      if (/\s/.test(raw)) {
+        // 命令文本：逐 token 抽像路径的（去引号）
+        for (const tok of raw.split(/\s+/)) {
+          const t = tok.replace(/^["']|["']$/g, '');
+          if (/^[\w.\-~]*[\\/][\w.\-~\/]*$/.test(t) && /[\\/]/.test(t)) pathish.push(t);
+        }
+      } else if (/[\\/]/.test(raw)) {
+        pathish.push(raw);
+      }
+    }
+    if (pathish.length < 2) return null;
+    // 源 ＝ 带 danger 标的那个；目标 ＝ 另一个
+    let src = null; let dst = null;
+    for (const pth of pathish) {
+      const key = [...this.sessDanger.keys()].find((k) => k === pth || k.endsWith(pth) || pth.endsWith(k));
+      if (key && !src) { src = pth; continue; }
+      if (!dst) dst = pth;
+    }
+    if (!src || !dst) return null;
+    const srcKey = [...this.sessDanger.keys()].find((k) => k === src || k.endsWith(src) || src.endsWith(k));
+    if (!srcKey) return null;
+    // ③ 目标落点可执行？⇒ 才构成「危险内容 × 可执行落点」
+    if (!/\.(sh|bash|zsh|fish|ps1|psm1|bat|cmd|py|rb|pl)$/i.test(dst)) return null;
+    return {
+      reason: `落点变更重判：源「${src}」带危险形态标记（${this.sessDanger.get(srcKey)?.shape ?? '危险形态'}），`
+        + `本次把它移到可执行落点「${dst}」——危险内容 × 可执行落点，须由人取极（问一句，不直接拒）`,
+    };
   }
 
   // ---------- 步骤前置裁决（对应 DSH agent/pre-step）：消息级 H 边界 ----------
