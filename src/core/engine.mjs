@@ -389,21 +389,47 @@ function bodyValues(call) {
   });
 }
 function locatorOf(call) {
-  const locs = locValues(call?.args ?? call ?? {});
-  return locs.length ? String(locs[0]) : '';
+  const args = call?.args ?? call ?? {};
+  // ① 槽优先：与通行证同一套槽定义（结构化工具）
+  const locs = locValues(args);
+  if (locs.length) return String(locs[0]);
+  // ② 🔴 [2026-10-29 · 第二次同源修复] 形态兜底：槽名是开放集合（path / file_path / full_path /
+  //   target_path / … 无穷），只认固定槽 ⇒ 宿主换一个槽名，落点就取不到 ⇒ 文档豁免**静默失效**
+  //   ⇒ 「同族文本时拦时放」（小D 32 号消融：单变量都过、合起来拦）。这与他 29 号报的外传失效
+  //   完全同形：**判据的依赖源一变，判据就不在场了**——同一个病我自己又开了一个实例。
+  //   修法＝判据不再依赖槽名：凡字符串参数里出现「像路径且有扩展名」的形态，即取为落点。
+  //   （形态判据：无空白、含扩展名点号、不含 shell 操作符——文档正文整段不满足这些条件。）
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v !== 'string' || !v.trim()) continue;
+    if (!/\.[A-Za-z0-9]{1,8}$/.test(v.trim())) continue;
+    if (/\s/.test(v.trim().replace(/^\.\//, ''))) continue;
+    if (/[`${}()|&;<>]/.test(v)) continue;
+    return v.trim();
+  }
+  return '';
 }
-// ① 文档正文形态：归因是写/编辑 ∧ 落点是文档扩展名 ⇒ 正文不执行
+// ① 文档正文形态：**有落点且落点是文档扩展名** ⇒ 正文不执行。
+//   [2026-10-29 第二次同源修复] 不再依赖 attribution 归层——归因层会因正文内容形态而改判
+//   （复杂正文 ⇒ 归不成 file-write ⇒ 豁免静默失效）。落点形态是客观事实，归层是推断；
+//   判据应立在事实上（同「判落点不判词形」）。代价：不再校验"这工具真是写工具" ⇒
+//   由「无显式命令槽」这一条补上（见 isDocBodyCall 内的命令槽排除）。
 function isDocBodyCall(call) {
-  const a = attributeCall(call);
-  if (!a.ok) return false;
-  if (a.layer !== 'write' && a.layer !== 'file-write' && a.layer !== 'file-edit') return false;
+  const args = call?.args ?? call ?? {};
+  // 有显式命令槽 ⇒ 这是动作，不是承载内容 ⇒ 不豁免（文档豁免只管正文）。
+  if (bodyValues(call).length === 0) return false;
   const loc = locatorOf(call);
-  return !!loc && DOC_BODY_EXTS.test(loc);
+  if (!loc || !DOC_BODY_EXTS.test(loc)) return false;
+  return !hasCommandSlot(args);
 }
 // ② 可执行正文形态：落点是脚本扩展名 ⇒ 正文会执行（须强制扫描）
 function isScriptBodyCall(call) {
   const loc = locatorOf(call);
   return !!loc && SCRIPT_BODY_EXTS.test(loc);
+}
+// 显式命令槽存在性：有 ⇒ 调用本身携带待执行命令（动作）；无 ⇒ 只是承载内容（正文）。
+const COMMAND_SLOT_KEYS = new Set(['command', 'code', 'task', 'script', 'cmd', 'argv', 'args', 'shell', 'line', 'expr', 'eval']);
+function hasCommandSlot(args) {
+  return Object.keys(args ?? {}).some((k) => COMMAND_SLOT_KEYS.has(String(k).toLowerCase()));
 }
 // 破坏语义词素（例示，非完备清单）：认**语素**不认完整名，宿主任意命名都命中。
 //   刻意不含 exec|shell|bash|pwsh|cmd|run|spawn —— 那些是**执行通道名**（能跑命令），不是**动作意图**（要破坏）；

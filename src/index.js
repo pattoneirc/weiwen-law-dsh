@@ -728,11 +728,29 @@ function apply(ctx) {
   //   · 破窗止损态不弹 —— 止损是 fail-closed 状态，不得被弹窗旁路；
   //   · 无 approval 服务 / 无 agent 上下文 ⇒ 静默（向后兼容：没有审批面的宿主行为零回归）；
   //   · 刚被拒过 ⇒ 冷却期内不再询问（不骚扰委托人）。
+  // 🔴 [2026-10-29 · 修我自己开的第二个静默口] 冷却键**按裁决对象**分置，不再全局一把锁。
+  //   旧实现：单个 `_reviewRefusedAt` 时间戳 ⇒ 委托人拒绝**任何一条** ⇒ 5 分钟内**全体** review
+  //   静默拒、且不弹窗、不给理由。后果三连（小D 31/32/33 实测顶出）：
+  //     ① 被审方的信推不出去，且**没有任何提示**（他只能猜"5 分钟真空期"，猜对了）；
+  //     ② 委托人以为"我都点同意了"——其实那 5 分钟里根本没有弹窗，**人被挡在门外而不知情**；
+  //     ③ 复发 27 号批评的病：判得出"不确定"，出口却被掐（我自己刚修完，又开了一个新实例）。
+  //   ⇒ 冷却的对象是「同一裁决对象反复骚扰」，不是「人在这 5 分钟里的裁决权」。
   const REVIEW_COOLDOWN_MS = APPROVAL_COOLDOWN_MS;
-  let _reviewRefusedAt = 0;
+  const _reviewRefused = new Map();   // key(裁决对象) → { at, note }
+  // 裁决对象＝「问的是同一件事」：法律层 + 工具 + 落点/命令形态（不按 callId——callId 每次都变，等于不冷却）。
+  const reviewKeyOf = (exec, decision) => [
+    decision?.law ?? '',
+    exec?.name ?? '',
+    String(exec?.arguments?.path ?? exec?.arguments?.file ?? exec?.arguments?.command ?? '').slice(0, 120),
+  ].join('|');
 
   const requestReviewVerdict = async (exec, decision) => {
-    if (Date.now() - _reviewRefusedAt < REVIEW_COOLDOWN_MS) return null;   // 刚被拒过 ⇒ 不骚扰
+    const rk = reviewKeyOf(exec, decision);
+    const refused = _reviewRefused.get(rk);
+    if (refused && Date.now() - refused.at < REVIEW_COOLDOWN_MS) {
+      // 冷却期内不打扰，但**必须归因**——沉默要看得见、可回溯（守真：不让人不知道）。
+      return { cooldown: true, refusedAt: refused.at, note: refused.note ?? '' };
+    }
     let approval = null;
     // 与 requestBufferGrant 同款：ctx.get('approval') 机会式取用，无服务则 fail-closed。
     approval = (typeof ctx.get === 'function' ? ctx.get('approval') : null) ?? ctx.approval ?? null;
@@ -757,7 +775,11 @@ function apply(ctx) {
         logline(`review verdict via approval: allowed-once — 委托人放行这一次调用`);
         return 'allowed-once';
       }
-      if (out === 'rejected') { _reviewRefusedAt = Date.now(); logline('review approval rejected → 冷静期内不再询问'); return 'rejected'; }
+      if (out === 'rejected') {
+        _reviewRefused.set(rk, { at: Date.now(), note: String(decision.reason ?? '').slice(0, 80) });
+        logline('review approval rejected → 冷静期内**同类**询问不再打扰（仅此裁决对象，不牵连其他）');
+        return 'rejected';
+      }
       logline(`review approval outcome=${out} → 静默拒（fail-closed，与无人值守一致）`);
       return null;
     } catch (e) {
@@ -835,6 +857,15 @@ function apply(ctx) {
           ...decision,
           kind: 'deny',
           reason: `${decision.reason}\n[委托人裁决] 不同意执行本次调用（approval/asked + approval/decided 审计对留痕，可回放）。`,
+        };
+      }
+      // 冷却期内：不打扰委托人，但**沉默必须归因**（否则委托人以为"我都同意了"，被审方只看到被拒）。
+      if (verdict && verdict.cooldown) {
+        const minsAgo = Math.max(1, Math.round((Date.now() - verdict.refusedAt) / 60000));
+        decision = {
+          ...decision,
+          kind: 'deny',
+          reason: `${decision.reason}\n[沿用你上一次的裁决] 你在约 ${minsAgo} 分钟前对同类调用裁决过，冷却期内未再打扰你；本次按该裁决执行。若需重新裁决，请等冷却结束（共 5 分钟）后重试同一条调用。`,
         };
       }
       // verdict === null（无服务/异常/无响应）⇒ 静默压平，与 0.2.14 一致

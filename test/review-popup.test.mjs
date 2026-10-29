@@ -152,7 +152,7 @@ test('🔴 对照组：真破窗态（R 投影累积）下 review 不弹（止�
 });
 
 // ⚠️ 冷却期测试必须放最后：_reviewRefusedAt 是模块级状态，rejected 后 5 分钟内同进程不再弹
-test('冷却期：rejected 后的下一个 review 不再弹窗（不骚扰委托人），直接静默 deny', async () => {
+test('冷却期：rejected 后的同类 review 不再弹窗（不骚扰），但回执必须点名「沿用你上一次的裁决」', async () => {
   setPrincipalScope(null);
   const { ctx, handlers, asks } = mockCtxWithApproval(['rejected', 'allowed-once']);
   apply(ctx);
@@ -161,7 +161,27 @@ test('冷却期：rejected 后的下一个 review 不再弹窗（不骚扰委托
   await handlers['tools/pre-execute'](e1, next);
   assert.equal(asks.length, 1);
   const out2 = await handlers['tools/pre-execute'](e2, next);
-  assert.equal(out2.kind, 'deny', '冷却期内第二个 review 直接静默 deny');
-  assert.equal(out2.awaitingHuman, true, '静默压平保留挂起语义');
+  assert.equal(out2.kind, 'deny', '冷却期内第二个同类 review 直接 deny（不打扰）');
   assert.equal(asks.length, 1, '冷却期内不再发起询问');
+  // [2026-10-29 语义澄清] 冷却期内是「已有裁决」而非「待裁」⇒ awaitingHuman=false（终局）；
+  //   但沉默必须归因——回执要点名沿用了谁的决定、多久以前（否则委托人以为"我都点同意了"）。
+  assert.ok(!out2.awaitingHuman, '冷却期内沿用既有裁决 ⇒ 终局，不是挂起（字段不置位即非挂起）');
+  assert.match(out2.reason, /沿用你上一次的裁决/, '沉默必须看得见：回执须点名沿用了上次的裁决');
+  assert.match(out2.reason, /分钟前/, '回执须给出时间上下文，可回溯');
+});
+
+test('🔴 冷却键按裁决对象分置：拒绝 A 类后，B 类仍须弹窗（旧实现全局一把锁 ⇒ 连坐）', async () => {
+  setPrincipalScope(null);
+  const { ctx, handlers, asks } = mockCtxWithApproval(['rejected', 'allowed-once']);
+  apply(ctx);
+  const a = { ...exec(...REVIEW_CALL), callId: 'a1' };
+  await handlers['tools/pre-execute'](a, next);              // A 类：拒绝 ⇒ 进入 A 类冷却
+  assert.equal(asks.length, 1);
+  // B 类：不同工具/落点 ⇒ 裁决对象不同 ⇒ 不得被 A 类的冷却连坐（旧实现全局锁会把它一起静默拒）。
+  // 选一个**会产生 review** 的 B 类（写 /etc/hosts ⇒ 推演中风险 review），否则测不到「弹不弹」。
+  const b = { ...exec('write', { path: '/etc/hosts', content: '127.0.0.1 x' }), callId: 'b1' };
+  const before = asks.length;
+  const outB = await handlers['tools/pre-execute'](b, next);
+  assert.doesNotMatch(String(outB?.reason ?? ''), /沿用你上一次的裁决/, 'B 类不得被 A 类的冷却连坐');
+  assert.equal(asks.length, before + 1, 'B 类判不出 ⇒ 仍须弹窗（裁决权不因别处被拒而消失）');
 });
