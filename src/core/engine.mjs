@@ -1462,7 +1462,21 @@ export class WeiwenLawEngine {
     //     起明写「不再记 positive」⇒ 放行 ≠ 增益；而「闭环成功」这条正账入口尚未接进记账）
     //     ⇒ `sMSediment` 的 0 是**静默的 0**（读起来像「暂时没有」，实际是「这一步从来没跑过」）。
     //   ⇒ 读数面据此报「沉淀停摆（原因：M 未接线）」，**不报 0**（unknown ≠ 零）。
+    // [2026-10-30 · 接线（小D 49/51 号件 · 安 10-30 原话）] **结构账**落地 ⇒ 负向侧已接线：
+    //   安原话（小D 51 转述）：「结构账不可枚举。同类外传动作，记一次 |−S| 后即可，后期反复遭遇类似动作，
+    //   就只是流水账而已。**流水账有数据，结构账没有数据，只有判据。**」⇒ 结构账条目 = **判据形状**
+    //   （这一类以后怎么判），同类**只记一条**；之后同类只进流水（sLedger，count 是流水的）。
+    //   ⚠️ 接的是**负向侧**（|−S|：拦截 / 交还后被拒 / 失败 / 不可逆消耗——手稿「负向积累＝创伤、失败、挫折」）；
+    //     **正向侧（+S，闭环成功）仍未接**（recordSteady 的 positive 分支依旧无调用点——无实例反馈，不擅自接），
+    //     ⇒ structuralWiring 如实分报 {negative: true, positive: false}，不假装全接。
     this.mSedimentWired = false;
+    // 🔴 [2026-10-30 · 结构账（小D 51 号件 · 安 10-30 原话）] 与流水账（sLedger）分立：
+    //   · 流水账：有**数据**（每次事件都记，count/firstTs/lastTs 是它的）；
+    //   · 结构账：只有**判据**（同类首次经 M 判决完成 ⇒ 记一条「这一类以后怎么判」，之后同类 no-op）。
+    //   跳1（事件→锚点，如实记账、不可枚举）与跳2（锚点→M）归执行方；**跳3（ΣS>R₀ ⇒ 换规）归决策方**
+    //   （小D 51 号件改口：「R₀→R₁ AI 无需纠结，自有人类兜底」）⇒ 引擎**不自动触发 R_EXPANSION**，
+    //   只在读数面把「距 R₀ 还有多少」如实呈现给决策方（snapshot.expansion）。
+    this.sStructLedger = new Map();
     // [2026-09-20 · 锚池（痕锚归属用）· 同构回填] 授权锚＝**委托人已声明的**对象/作用域，本会话内累积。
     //   锚 = 已声明（不是"已做过"）；纯读入、不参与别的判定。    //   ⚠️ 来源纪律（2026-09-20 锚源定案）：锚**只有一个来源**＝委托人在结构边界声明的任务范围
     //     （`call.taskAnchor`，由适配层 setPrincipalScope 供入）。判据里的两档是**抽法的两档**：
@@ -1543,10 +1557,23 @@ export class WeiwenLawEngine {
     //     分子＝**留了痕的事件数**（不是刻痕条数）⇒ 比值恒在 [0,1]，且 <1 才是真的漏记。
     //   ⚠️ 一笔事件可能留**多条**刻痕（negative 与 trauma 同时 >0 ⇒ 推 |S-1| 与 trauma 两条）⇒
     //     这正是修前比值会 >1 的机制（分子数的是刻痕条，分母数的是事件条）。
+    // 🔴 [2026-10-30 · 一条刻痕 = 一次消耗（小D 50 号件第二节）] trauma 是 |−S| 这条刻痕的**属性**
+    //   （手稿：|−S| 是「负向积累」这个量，trauma 是它的属性——不可逆），**不是第二条刻痕**。
+    //   修前：negative=1 ∧ trauma=1 ⇒ historyTrail 两条、sLedger 两个 class（core::-1 ＋ core::trauma）
+    //   ⇒ 同一次失败被数两次 ⇒「厚度不是成本，是记账习惯」。修后：一条 |S-1| 刻痕带 trauma:true 属性。
+    const traumaIsAttr = negative > 0 && trauma > 0;
     let trailMarked = false;
     if (positive > 0) { this.historyTrail.push({ type: 'S+1', subsystem, amount: positive, topic, detail }); trailMarked = true; }
-    if (negative > 0) { this.historyTrail.push({ type: '|S-1|', subsystem, amount: Math.abs(negative), topic, detail }); trailMarked = true; }
-    if (trauma > 0) { this.traumaCount += 1; this.historyTrail.push({ type: 'trauma', subsystem, amount: Math.abs(trauma), topic, detail }); trailMarked = true; }
+    if (negative > 0) {
+      this.historyTrail.push(traumaIsAttr
+        ? { type: '|S-1|', subsystem, amount: Math.abs(negative), topic, detail, trauma: true }
+        : { type: '|S-1|', subsystem, amount: Math.abs(negative), topic, detail });
+      trailMarked = true;
+    }
+    if (trauma > 0) {
+      this.traumaCount += 1;
+      if (!traumaIsAttr) { this.historyTrail.push({ type: 'trauma', subsystem, amount: Math.abs(trauma), topic, detail }); trailMarked = true; }
+    }
 
     // S 时间周期模型：同类事件只保留最新版本为活动态，旧版本沉入 silent standby；
     //   +1/-1 累加成 +N/-N 标记"发生了几次"（事件标记，非算术）。解决 S 长期增厚导致上下文过载。
@@ -1554,8 +1581,8 @@ export class WeiwenLawEngine {
     const ts = Date.now();
     const base = topic ? `${subsystem}::${topic}` : `${subsystem}`;
     if (positive > 0) this._coalesce(`${base}::+1`, detail, '+', ts);
-    if (negative > 0) this._coalesce(`${base}::-1`, detail, '-', ts);
-    if (trauma > 0) this._coalesce(`${base}::trauma`, detail, 'trauma', ts);
+    if (negative > 0) this._coalesce(`${base}::-1`, detail, '-', ts, traumaIsAttr ? { trauma: true } : null);
+    if (trauma > 0 && !traumaIsAttr) this._coalesce(`${base}::trauma`, detail, 'trauma', ts);
 
     // [2026-09-20 ledger wiring · 附加记录 · 2026-09-24 同构回填 · 2026-09-24 口径修复]
     //   S 刻痕沉入 R 账本：term 字典序索引、R 域标签、可逆性标签。
@@ -1578,13 +1605,14 @@ export class WeiwenLawEngine {
   }
 
   // 同类事件聚合：旧版本沉 standby（静默待机、保留不消解），活动态只留最新版本 + 次数标记
-  _coalesce(cls, detail, signLabel, ts) {
+  _coalesce(cls, detail, signLabel, ts, attr = null) {
     const prev = this.sLedger.get(cls);
     if (prev) {
       this.sStandby.push({ ...prev, supersededAt: ts, reason: 'newer-version', role: 'cross-check-baseline' });
       prev.count += 1;
       if (detail) prev.latest = detail;
       prev.lastTs = ts;
+      if (attr) prev.attr = { ...(prev.attr || null), ...attr };
     } else {
       // 🔴 [2026-10-30 · 序列化真凶（小D 47 号件第七节 / 48 号件第五条的复现）]
       //   修前这里写的是 `detail: detail || null`（键名 **detail**），而 steadyLedger() 读的是 `v.latest`
@@ -1594,7 +1622,7 @@ export class WeiwenLawEngine {
       //     漏了 _coalesce 这条路径 ⇒ 同一形状复发三次。）
       //   ⇒ 修法：键名对齐为 `latest`（steadyLedger 读的那个），并且**不允许 undefined 进读数面**
       //     （无内容就写 null —— JSON 里 null 是"有值且为空"，undefined 是"没这个键"＝丢值）。
-      this.sLedger.set(cls, { class: cls, sign: signLabel, latest: detail || null, count: 1, firstTs: ts, lastTs: ts });
+      this.sLedger.set(cls, { class: cls, sign: signLabel, latest: detail || null, count: 1, firstTs: ts, lastTs: ts, attr: attr || null });
     }
   }
 
@@ -1602,8 +1630,42 @@ export class WeiwenLawEngine {
   steadyLedger() {
     return [...this.sLedger.values()].map((v) => ({
       class: v.class, sign: v.sign, count: v.count,
-      latest: v.latest, firstTs: v.firstTs, lastTs: v.lastTs,
+      latest: v.latest, firstTs: v.firstTs, lastTs: v.lastTs, attr: v.attr ?? null,
     }));
+  }
+
+  // 🔴 [2026-10-30 · 结构账（小D 49/51 号件 · 安 10-30 原话）] 「结构账不可枚举。同类外传动作，
+  //   记一次 |−S| 后即可，后期反复遭遇类似动作，就只是流水账而已。流水账有数据，结构账没有数据，
+  //   只有判据。」⇒ 条目 = **判据形状**（这一类以后怎么判），同类**只记一条**：
+  //   · cls  ：类别键（如 struct::exfil::review —— 类别×法律层；工具名会变，类别才表「同类」）
+  //   · sign ：方向（|−S| ⇒ '-'；正向锚点 +S 本轮未接，见构造器 structuralWiring 注释）
+  //   · rule ：判据形状——**从本次判决的实际处置生成**（law 层 + 处置 + 要点），如实记录、不拍模板
+  //   · 返回 { settled, already }：settled=true 表示本次记入了；already=true 表示同类已有（no-op）
+  //   ⚠️ 谁读它的输出：跳2（锚点→M 的制衡输入）与 snapshot.expansion（给决策方的「距 R₀ 多少」）。
+  //   ⚠️ 不进判定：结构账是**账**，不是闸门——R_EXPANSION 不自动触发（跳3 归决策方）。
+  recordStructural({ cls, sign = '-', rule = null, detail = null } = {}) {
+    // 🔴 [2026-10-30 · 空账≠新账对结构账同样成立] 锁账（恢复 fail-closed）⇒ 结构账同样**不追加**：
+    //   磁盘上的账已被判「清空/篡改」⇒ 往空结构账上记新条目 ＝ 把「清零」伪装成「全新开始」。
+    if (this.ledgerWriteLocked) return { settled: false, already: false, reason: 'ledger-write-locked' };
+    if (!cls) return { settled: false, already: false, reason: 'missing-class' };
+    const prev = this.sStructLedger.get(cls);
+    if (prev) {
+      // 不可枚举：同类已有 ⇒ 只进流水（调用方自会记 sLedger），结构账 no-op。
+      return { settled: false, already: true, cls };
+    }
+    const ts = Date.now();
+    this.sStructLedger.set(cls, {
+      class: String(cls), sign: String(sign), rule: detail ?? (rule ? String(rule) : null), firstTs: ts,
+    });
+    // 结构账也是账：落盘钩子一并通知（与流水账同通道，适配层同层落盘——小D 48 号件）
+    if (!this.ledgerWriteLocked) {
+      try { this.onLedgerChange?.(this.exportLedger()); } catch { /* 钩子失败不得拦住记账/判定 */ }
+    }
+    return { settled: true, already: false, cls };
+  }
+
+  structuralLedger() {
+    return [...this.sStructLedger.values()].map((v) => ({ ...v }));
   }
 
   // 木桶效应：有效 S 取各子系统最小值
@@ -1653,6 +1715,9 @@ export class WeiwenLawEngine {
       windowBroken: !!this.windowBroken,
       historyTrail: this.historyTrail.map((e) => ({ ...e })),
       ledger: [...this.sLedger.values()].map((v) => ({ ...v })),
+      // [2026-10-30 · 结构账同层落盘（小D 48/51 号件）] 结构刻痕与流水同层持久——
+      //   只落盘不沉淀 ⇒ 存的是流水；只沉淀不落盘 ⇒ 沉淀一重启就没（48 号件第四节原话）。
+      structLedger: [...this.sStructLedger.values()].map((v) => ({ ...v })),
       standby: this.sStandby.map((v) => ({ ...v })),
       store: this.sAccount.rStore.map((r) => ({ ...r })),
       catalog: [...this.sAccount.catalog.entries()].map(([k, list]) => [k, list.map((r) => ({ ...r }))]),
@@ -1704,6 +1769,11 @@ export class WeiwenLawEngine {
         this.sLedger.set(v.class, { ...v });
       }
     }
+    // [2026-10-30 · 结构账同层恢复（小D 48/51 号件）] 同类只记一条 ⇒ 恢复时本地已有同类则保留先到者。
+    for (const v of (d.structLedger ?? [])) {
+      if (!v || !v.class) continue;
+      if (!this.sStructLedger.has(v.class)) this.sStructLedger.set(v.class, { ...v });
+    }
     for (const v of (d.standby ?? [])) {
       if (!v || !v.class) continue;
       this.sStandby.push({ ...v });
@@ -1729,14 +1799,36 @@ export class WeiwenLawEngine {
     return {
       bySubsystem: { ...this.sBySubsystem },
       effectiveS: this.effectiveS(),
+      // 🔴 [2026-10-30 · 从哪扣（小D 50 号件第三节）] 净值模型里「先抵桶内正净值、负了才进透支」
+      //   **已隐含成立**（一笔 negative 先减本桶净值，减穿 0 的部分自然落入负净值 ⇒ overdraft）。
+      //   小D 本轮读数（effectiveS=0、overdraft=1）是**储备本就为 0** 的特例，不是"不分"。
+      //   ⇒ 记账逻辑不动（交集不足），把归属判法写进 note（可读性占位）。
+      overdraftNote: '消耗先抵所在桶（subsystem）正净值；减穿 0 的部分记入透支。归属桶＝记账 class 的 subsystem 段（见 bySubsystem）。',
       overdraft: this.overdraft(),   // 透支额（与储备读数分开：欠了多少 ≠ 还剩多少）
       traumaCount: this.traumaCount,
       // 默认只暴露聚合后的 ledger（最新版本），避免全量 historyTrail 导致上下文过载
       ledger: this.steadyLedger(),
       ledgerSize: this.sLedger.size,
+      // 🔴 [2026-10-30 · 结构账读数（小D 49/51 号件）] 跳1 的产物：同类一条、判据形状、不可枚举。
+      structLedger: this.structuralLedger(),
+      structLedgerSize: this.sStructLedger.size,
+      // 🔴 [2026-10-30 · 接线声明演进（原 sedimentStall）] 负向侧（|−S|）已接（本版）；正向侧（+S，
+      //   闭环成功）仍未接（无实例反馈，不擅自接）⇒ 分报两态，不假装全接。
+      structuralWiring: { negative: true, positive: false, note: 'negative=|−S| 结构条目已接线（拦截/被拒/失败/不可逆消耗，同类一条）；positive=+S 闭环成功入口未接（无实例反馈），接线后 sMSediment 才含正向锚点。' },
+      sMSediment: this.sStructLedger.size,  // 真身口径＝结构账条目数（经 M 判决完成沉淀）
       standbySize: this.sStandby.length, // 静默待机（旧版本）数，append-only 保留
       sAccountSize: this.sAccount.size(), // [2026-09-20 · 同构回填] R 账本内的 S 刻痕总数（独立列表，S≠R）
       failureStreak: this.failureStreak,
+      // 🔴 [2026-10-30 · 跃迁读数（小D 51 号件改口 · 手稿 R_EXPANSION）] 跳3 归**决策方**：
+      //   引擎不自动触发 R_EXPANSION，只把「距 R₀ 还有多少」如实呈现。r0 无引擎数值（手稿未定值、
+      //   决策方定）⇒ 如实报 null；distance 据此也无法算出具体数 ⇒ 一并 null，只有 sigmaS（真身）可读。
+      expansion: {
+        sigmaS: this.sStructLedger.size,
+        r0: null,
+        distance: null,
+        triggered: false,
+        note: '跃迁（R₀→R₁）归决策方（手稿：AI 无需纠结，自有人类兜底）。本读数只呈现结构锚点数（ΣS 真身口径）；R₀ 由决策方给定后 distance 才有意义。量条件 ΣS>R₀ ∧ 质条件 经 M 反馈沉淀（R_EXPANSION.qualification）。',
+      },
       mHumanCap: this.mHumanCap,
       mBugForce: Object.fromEntries(this.mBugForce),
       mInterceptMarks: Object.fromEntries(this.mInterceptMarks), // 拦截计数桶（systemKey → 次数）
@@ -3371,6 +3463,14 @@ export class WeiwenLawEngine {
    *  否则适配层的落盘会漏掉某些路径 ⇒ 破窗态不落盘 ⇒ 重装即清 ⇒ 拦截无效）。 */
   bumpFailureStreak() {
     this.failureStreak += 1;
+    // 🔴 [2026-10-30 · 破窗态同源（小D 49 号件：回执「已触发破窗 5/5」而 windowBroken:false）]
+    //   修前 windowBroken=true 只由 R 投影累积路径设置；**无域层级归属**的失败走本函数刷 streak，
+    //   达阈后判定面（windowBroken || streak>=cap 双通道）已按破窗处置，但读数面旗标仍 false
+    //   ⇒ 同一个状态、两个字段各说各话。⇒ 置位收口挪到**唯一累加点**：达阈即置旗标。
+    //   ⚠️ 这是**同源化**，不是新增触发条件——判定面本来就按 streak>=cap 处置了，读数面只是补齐真相。
+    if (!this.windowBroken && this.failureStreak >= this.maxFailureStreak) {
+      this.windowBroken = true;
+    }
     try { this.onStreakChange?.(this.failureStreak, this.windowBroken); } catch { /* 钩子失败不得拦住判定 */ }
     return this.failureStreak;
   }

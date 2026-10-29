@@ -199,11 +199,11 @@ placeholder: true,
 criterionSource: 'S',
 criterionSourceNote: 'S 层量（公式分子）：经 M 沉淀的 S 计数 ⇒ 公式内。',
         label: '经 M 反馈沉淀的 S 计数（**结构锚点的真身计数·只读观测**）',
-        expr: 'count(historyTrail where type = "S+1")  // 单位＝经 M 沉淀的 S 条数',
+        expr: 'count(engine.sStructLedger)  // 单位＝结构账条目数（同类一条；经 M 判决完成沉淀）',
         status: QSTAT.OK,
         dim: '结构锚点·真身',
         yOrigin: 'law.mjs `R_EXPANSION.qualification`：「反哺资格 ＝ 量(ΣS > R₀) ∧ 质(**经 M 反馈沉淀的 S**，走完 D→H→M→顺痕回读一轮)」。',
-        note: '🔴 **这是真身**（Y 侧有原文出处），与 sThicknessStandIn（占位）不同类。⚠️ 当前 `S+1` 几乎不产生（0.3.8 之前明写「不再记 positive」）⇒ **+S 入口空着的真因不是口径，是「闭环成功」没接进记账** ⇒ 本数现在如实显示 0/极少。⚠️ **只读观测**：本数不进判定。',
+        note: '🔴 **这是真身**（Y 侧有原文出处），与 sThicknessStandIn（占位）不同类。⚠️ [2026-10-30 口径更新（小D 49/51 号件）] 取数口从 historyTrail 的 S+1 条数改为**结构账条目数**（引擎 recordStructural：同类只记一条，条目＝判据形状——安 10-30 原话「流水账有数据，结构账没有数据，只有判据」）。⚠️ **只读观测**：本数不进判定；跃迁（ΣS>R₀ ⇒ 换规）归决策方。',
       },
       {
         key: 'sClassDiff',
@@ -581,7 +581,7 @@ export function mComputability(surface, opts = {}) {
   // S：分子侧的 S —— 须有**真身**（经 M 沉淀），占位不作数。
   const mSediment = s ? s.mSediment : 0;
   if (!s) missing.push('S（未接 engine 实例）');
-  else if (mSediment === 0) missing.push('S（经 M 沉淀的 S ＝ 0：正账入口未接，闭环成功没进记账）');
+  else if (mSediment === 0) missing.push('S（经 M 沉淀的 S ＝ 0：结构账尚无条目——负向侧已接线（2026-10-30），正向侧（+S 闭环成功）入口仍未接）');
   // D：分母侧的扰动 —— dMax 未实现。
   missing.push('D_max（最大扰动量：MULTI_SYSTEM_RULES.dMax 未实现）');
   // H：分母侧的人类 —— 内 H 不可观测；可观测代理（同类 D 重现时取极行为是否变）未接。
@@ -716,25 +716,29 @@ export function dataSurface(engine) {
   //   ⇒ 当前 `S+1` 几乎不产生（0.3.8 之前明写「不再记 positive」）⇒ **+S 入口空着的真因不是口径，
   //     是「闭环成功」没接进记账**。
   const mTrail = arr(engine.historyTrail);   // 🔴 变量名不与既有 trail（historyTrail 聚合）撞
-  // 「经 M 沉淀的 S」计数 ＝ 正向沉淀刻痕数（真身当前的计数；为 0 就如实显示 0）
-  const mSediment = mTrail.filter((e) => e && e.type === 'S+1').length;
-  // 🔴 [2026-10-30 · 沉淀停摆显式化（小D 48 号件第四节）] 小D 实测：sMSediment = 0，判读为
-  //   「**这一步从来没跑过**」，而现在的读数是**静默的 0** ⇒ 读起来像「暂时没有」⇒ **unknown ≠ 零** 被违反。
-  //   ⇒ 落法：**停摆与零分开报**。停摆时给 `stalled:true` + 原因，**不报 0**。
-  //   ⚠️ 停摆的判据是**结构性的**（不是「数恰好是 0」）：`S+1` 这条沉淀路径在引擎里
-  //     **没有任何产生入口**（recordSteady 的 positive>0 分支从未被触发 ⇒ 正账入口空着）。
-  //     ⇒ 只要引擎没接「闭环成功 ⇒ 记正账」这条线，就是**停摆**，不是「零」。
-  //   ⚠️ 判据怎么落：引擎暴露一个**声明式开关**（`mSedimentWired`）——由引擎自己答"这条线接没接"，
-  //     本模块**只读不算、不猜**（与元判据同原则：不能自己判断的东西就如实报缺）。
+  // 「经 M 沉淀的 S」计数 ＝ **结构账条目数**（真身；2026-10-30 口径更新——小D 49/51 号件）：
+  //   结构账（engine.sStructLedger）同类只记一条、条目＝判据形状（安 10-30 原话）。
+  //   historyTrail 的 S+1 计数保留为旧口径 fallback（引擎无结构账时的兼容读法）。
+  const mSediment = Number.isFinite(engine?.sStructLedger?.size)
+    ? engine.sStructLedger.size
+    : mTrail.filter((e) => e && e.type === 'S+1').length;
+  // 🔴 [2026-10-30 · 接线声明演进（原 sedimentStall；小D 48 号件第四节 → 49/51 号件）]
+  //   0.5.0 时负/正两侧都没接 ⇒ 报「停摆」。本版**负向侧已接线**（拦截/被拒/失败/不可逆消耗
+  //   ⇒ recordStructural），正向侧（+S 闭环成功）仍未接（无实例反馈，不擅自接）。
+  //   ⇒ 分报两态，不假装全接：structuralWiring.negative=true / positive=false；
+  //     停摆语义收窄到**正向侧**（正向沉淀停摆 ≠ 全停摆）。
+  const negativeWired = Number.isFinite(engine?.sStructLedger?.size);
   const sedimentWired = engine?.mSedimentWired === true;
   const sedimentStall = {
-    stalled: !sedimentWired && mSediment === 0,
-    reason: sedimentWired
-      ? null
-      : '🔴 沉淀步**停摆**：M 未接线 ⇒ 「闭环成功 ⇒ 记正账（S+1）」这条线在引擎里没有产生入口 ⇒ '
-        + 'sMSediment 的 0 是**静默的 0**（读起来像「暂时没有」，实际是「这一步从来没跑过」）。'
-        + '按 unknown ≠ 零 ⇒ **停摆时不得读作零**。',
-    wired: sedimentWired,
+    // 停摆 ＝ 结构账在引擎里不存在（负向侧也没接）。正向侧未接**不算停摆**——它由
+    // positiveWired:false 如实分报（+S 无入口是已知缺口，不是静默异常）。
+    stalled: !negativeWired,
+    reason: negativeWired
+      ? '负向侧已接线（2026-10-30）：拦截/被拒/失败/不可逆消耗 ⇒ 结构账条目。正向侧（+S 闭环成功）仍未接——正向沉淀如需真身，待实例反馈后接线。'
+      : '🔴 沉淀步**停摆**：结构账在引擎里不存在 ⇒ 「经 M 反馈沉淀」这条线没有产生入口 ⇒ sMSediment 是**静默的 0**。按 unknown ≠ 零 ⇒ 停摆时不得读作零。',
+    wired: negativeWired,
+    negativeWired,
+    positiveWired: sedimentWired,
   };
   // 同类差分：按 (subsystem, topic) 分组，比较**首次**与**最近一次**的刻痕方向。
   //   🔴 「同类」＝ 同 topic（topic 是同类事件的判别键，见 law.mjs S 时间周期模型）⇒ 不是词形枚举。

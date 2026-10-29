@@ -106,7 +106,9 @@ test('🔴 只读差分：同类走向变了要被观测到（失败 → 成功 
   e.recordSteady({ negative: 1, topic: 'build', detail: '第一次失败', subsystem: 'core' });
   e.recordSteady({ positive: 1, topic: 'build', detail: '闭环成功', subsystem: 'core' });
   const d = dataSurface(e);
-  assert.equal(d.mSediment, 1, '「经 M 反馈沉淀的 S」计数（真身计数）＝ historyTrail 的 S+1 条数');
+  // 🔴 [2026-10-30 口径更新] mSediment 真身＝结构账条目数（recordSteady 不进结构账 ⇒ 0；
+  //   差分面本身仍走 historyTrail，行为不变）。
+  assert.equal(d.mSediment, 0, '结构账口径：recordSteady 不进结构账 ⇒ 真身计数 0');
   const cls = d.classDiff.entries.find((c) => c.class === 'core::build');
   assert.ok(cls, '同类（topic=build）必须在差分面里');
   assert.equal(cls.firstSign, '-', '首次是负向');
@@ -136,6 +138,15 @@ test('🔴 只读差分：不得影响判定与账本（只统计、不进账、
 test('🔴 「经 M 沉淀的 S」= 真身计数（Y 侧有原文出处），与占位字段不同类', () => {
   const e = ENG();
   assert.equal(dataSurface(e).mSediment, 0, '起点：还没有任何经 M 沉淀的 S（如实显示 0，不假装有）');
-  e.recordSteady({ positive: 1, topic: 'demo', detail: '闭环成功', subsystem: 'core' });
-  assert.equal(dataSurface(e).mSediment, 1, '记一次正向沉淀 ⇒ 真身计数 +1');
+  // 🔴 [2026-10-30 口径更新（小D 49/51 号件）] 真身取数口＝结构账（recordStructural）：
+  //   条目＝判据形状、同类只记一条（安 10-30 原话「结构账没有数据，只有判据」）。
+  //   recordSteady 是流水（count 的家）⇒ 不进结构账、不涨真身。
+  e.recordSteady({ positive: 1, topic: 'demo', detail: '流水正账', subsystem: 'core' });
+  assert.equal(dataSurface(e).mSediment, 0, '流水账不冒充真身：recordSteady 不涨结构账');
+  e.recordStructural({ cls: 'struct::demo::review', sign: '-', rule: '同类 ⇒ 问人；批则执行并记负账' });
+  assert.equal(dataSurface(e).mSediment, 1, '结构账记入一条 ⇒ 真身计数 +1');
+  // 不可枚举：同类第二条 no-op ⇒ 真身不涨（count 是流水的事）
+  const again = e.recordStructural({ cls: 'struct::demo::review', sign: '-', rule: '重复遭遇' });
+  assert.equal(again.already, true, '同类重复 ⇒ already=true');
+  assert.equal(dataSurface(e).mSediment, 1, '同类反复只进流水 ⇒ 真身仍 1');
 });

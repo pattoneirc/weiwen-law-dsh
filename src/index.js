@@ -1004,6 +1004,11 @@ function apply(ctx) {
       });
       if (out === 'allowed-once') {
         engine.grantBuffer(BUFFER_QUOTA, '委托人经审批通道解冻（非被审方自签）');
+        // 🔴 [2026-10-30 · 关门也留痕（小D 50 号件第三节）] actorAudit 的语义是「谁开的门」——
+        //   **关门（撤销/解冻/拒绝）是同一个问题的另一半**。修前缓冲档批准只留 approval 审计对
+        //   与 grant 弹窗记录，这里没有 actor 痕 ⇒ 安点了「同意撤销破窗」而 actorAudit 里查无此条。
+        recordActorAudit('buffer-grant', ACTOR_DECIDER,
+          `破窗解冻批准（缓冲配额 ${BUFFER_QUOTA} 次「本机/可回滚/无外部落点」；修好后自动复位＝撤销破窗态）`);
         logline(`buffer granted via approval (${BUFFER_QUOTA}) — 破窗解冻由委托人裁决`);
         return true;
       }
@@ -1276,6 +1281,14 @@ function apply(ctx) {
             action: String(call?.args?.command ?? call?.args?.body ?? '').slice(0, 200),
             detail: '外传已执行（人批准）：数据离开本地，不可撤回——稳态被消耗，如实记负账（账只增）',
           });
+          // 🔴 [2026-10-30 · 结构账接线（小D 51 号件 · 安 10-30 原话）] 同类外传首次经 M 完成
+          //   （review → 人批 → 执行）⇒ 记一条**判据形状**条目；之后同类只进流水（上条 recordSteady）。
+          //   rule 从本次实际处置生成，不是拍模板——「这一类以后怎么判」的如实刻痕。
+          engine.recordStructural?.({
+            cls: 'struct::exfil::review',
+            sign: '-',
+            rule: '同类外传 ⇒ 问人（review）；批则放行并记负账；不可撤回（数据离开本地）',
+          });
         }
         // 不进 markBlocked：放行的调用走真执行，回执是真结果，不是"我造成的 error"
         logline(`pre-execute ${exec?.name} -> review(委托人放行这一次) -> next | whitebox ${JSON.stringify({ ...decision, humanVerdict: 'allowed-once' })}`);
@@ -1310,6 +1323,21 @@ function apply(ctx) {
       // verdict === null（无服务/异常/无响应）⇒ 静默压平，与 0.2.14 一致
     }
     if (decision.kind === 'deny' || decision.kind === 'review') {
+      // 🔴 [2026-10-30 · 结构账接线（小D 49/51 号件 · 安 10-30 原话）] M 判决终局（deny / review
+      //   压平）＝「这一类以后怎么判」的**首次采样点**：类别 × 法律层同键只记一条（不可枚举）；
+      //   之后同类再被拦只进流水（failureStreak / markBlocked），结构账 no-op。
+      //   键 = `struct::${类别}::${法律层}`：类别表「哪类动作」，法律层表「哪层判的」——
+      //   同为 exec，R 层硬锚（删根：谁做都错）与 review（中风险：问人）判据形状不同 ⇒ 分条。
+      //   ⚠️ 不进判定：结构账是账不是闸门，R_EXPANSION 不自动触发（跳3 归决策方）。
+      try {
+        const catS = inferCategory(call ?? { name: exec?.name, args: exec?.arguments ?? {} }) || 'unknown';
+        const lawS = decision.law ?? 'review';
+        engine.recordStructural?.({
+          cls: `struct::${catS}::${lawS}`,
+          sign: '-',
+          rule: `${lawS} 层终局${decision.kind === 'review' ? '（判不出 ⇒ 交还人）' : '拦截'}：${String(decision.reason ?? '').split('\n')[0].slice(0, 120)}`,
+        });
+      } catch { /* 结构账失败不得拦住拦截本身 */ }
       markBlocked(exec);   // 同上：拦住 ≠ 失败
       // 阻断该步、不扩散（D 破窗止损 / M 以断保续 / 推演中高风险兜底）
       // review（中风险）在无人工确认环境保守拦截；reason 已标注"建议二次确认"
@@ -1487,6 +1515,15 @@ function apply(ctx) {
       }
       // 落盘由 onStreakChange 钩子承担（引擎内唯一累加收口 ⇒ 覆盖全部路径，不在此重复）。
       engine.onFailure();
+      // 🔴 [2026-10-30 · 结构账接线（小D 49 号件目标态①）] 真失败也是负向锚点（手稿：|−S| ＝
+      //   负向积累——创伤、失败、挫折）⇒ 结构账同类一条；之后同类失败只进流水（streak）。
+      try {
+        engine.recordStructural?.({
+          cls: 'struct::failure::onFailure',
+          sign: '-',
+          rule: '真失败（执行回 error 且非本层拦截）⇒ |−S| 记账 + 破窗累积；同类不重复记',
+        });
+      } catch { /* 结构账失败不得拦住失败入账 */ }
       logline(`result audit: failure accrued（streak=${engine.failureStreak}/${engine.maxFailureStreak}）`);
     }
   });
@@ -1523,8 +1560,19 @@ function apply(ctx) {
       return toLossless({
         effectiveS: engine.effectiveS(),   // 储备读数（到 0 为止）
         overdraft: engine.overdraft(),     // 透支额（欠了多少，与储备分开读）
+        // 🔴 [2026-10-30 · 从哪扣（小D 50 号件第三节）] 净值模型已隐含「先抵桶内正净值、负了才进透支」；
+        //   把归属判法写给读的人（占位级：不改记账，只补可读性）。
+        overdraftNote: '消耗先抵所在桶（subsystem）正净值；减穿 0 的部分记入透支。归属桶＝记账 class 的 subsystem 段（对照 bySubsystem/sLedger 对账）。',
         ledger: engine.steadyLedger(),
         ledgerSize: engine.sLedger.size,
+        // 🔴 [2026-10-30 · 结构账（小D 49/51 号件 · 安 10-30 原话）] 跳1 的产物读数：
+        //   条目＝判据形状（这一类以后怎么判），同类只记一条（不可枚举）；count 属于流水账。
+        structLedger: engine.structuralLedger(),
+        structLedgerSize: engine.sStructLedger.size,
+        sMSediment: engine.sStructLedger.size,   // 真身口径＝结构账条目数（经 M 判决完成沉淀）
+        structuralWiring: { negative: true, positive: false, note: 'negative=|−S| 结构条目已接线；positive=+S 闭环成功入口未接（无实例反馈）——接线前 ΣS 真身只含负向锚点。' },
+        // 🔴 [2026-10-30 · 跃迁读数（小D 51 号件改口）] 跳3 归决策方：不自动触发，只呈现距离。
+        expansion: engine.snapshot().expansion,
         standbySize: engine.sStandby.length,
         traumaCount: engine.traumaCount,
         failureStreak: engine.failureStreak,
