@@ -713,6 +713,59 @@ function apply(ctx) {
     return false;
   };
 
+  // ---------- review 出口：把「判不出」接上人类裁决（2026-10-29 · 安拍板「要要要」） ----------
+  // 病灶（小D 27 实测）：引擎判得出「不确定」（review 判决），适配层却把它压平成 deny（下方 L775 注释
+  //   自己写的：宿主契约只认 deny/next）⇒ 出口被接法压掉 ⇒ 实测观感＝静默拒。缺口在接法层，不在判据层。
+  // 修法：review ⇒ 经 approval 通道请求**人类裁决这一次调用**。与缓冲档的审批正交：
+  //   缓冲档批的是**状态**（解冻一段配额）；这里批的是**动作**（放行这一次调用）——
+  //   `allowed-once` 的 "once" ＝ 这一次调用，下一次同 call 重新走瀑布、重新问。把动作批成永久才是滑移。
+  // 三态映射（安的三态：同意 / 不同意 / 再议）：
+  //   allowed-once ⇒ 放行这一步；rejected ⇒ deny（标注委托人裁决，终局）；unavailable/无服务/异常/无响应 ⇒
+  //   静默 deny（与 0.2.14 行为逐位一致，fail-closed）——「再议」不假装审批通道有挂起态，落为：
+  //   本轮不执行 + runtime.log 留痕 + 人回头翻账（aqing/135 §二 方案 b）。
+  // 该静默的仍静默（对照组，测试锁死）：
+  //   · deny（R/D 确定性判决）永不弹 —— 弹窗只服务「判不出」，不给「判了但拒」翻案；
+  //   · 破窗止损态不弹 —— 止损是 fail-closed 状态，不得被弹窗旁路；
+  //   · 无 approval 服务 / 无 agent 上下文 ⇒ 静默（向后兼容：没有审批面的宿主行为零回归）；
+  //   · 刚被拒过 ⇒ 冷却期内不再询问（不骚扰委托人）。
+  const REVIEW_COOLDOWN_MS = APPROVAL_COOLDOWN_MS;
+  let _reviewRefusedAt = 0;
+
+  const requestReviewVerdict = async (exec, decision) => {
+    if (Date.now() - _reviewRefusedAt < REVIEW_COOLDOWN_MS) return null;   // 刚被拒过 ⇒ 不骚扰
+    let approval = null;
+    // 与 requestBufferGrant 同款：ctx.get('approval') 机会式取用，无服务则 fail-closed。
+    approval = (typeof ctx.get === 'function' ? ctx.get('approval') : null) ?? ctx.approval ?? null;
+    if (!approval || typeof approval.request !== 'function') return null;
+    if (!exec?.agent) return null;   // 无 agent 上下文 ⇒ 不知道问谁 ⇒ fail-closed
+    try {
+      const out = await approval.request({
+        agent: exec.agent,
+        toolName: exec.name ?? 'unknown',
+        callId: exec.callId,
+        reason: [
+          '【唯稳律 · 需要你的裁决】（这是授权请求，不是通知）',
+          `这条 "${exec?.name}" 引擎判为「不确定」${decision.law ? '(' + decision.law + ' 层)' : ''}——本层判据穷尽，按结构交还人类：`,
+          decision.reason ?? '',
+          '· 允许：只放行这一次调用（下一次同样的事会再来问你）。',
+          '· 拒绝：本次不执行，5 分钟内同类询问不再打扰。',
+          '· 不答：本次不执行（与无人值守一致，属预期行为）。',
+          '说明：你的决定会记为 approval/asked + approval/decided 审计对，可回放——不是聊天里说一句就算数。',
+        ].filter(Boolean).join('\n'),
+      });
+      if (out === 'allowed-once') {
+        logline(`review verdict via approval: allowed-once — 委托人放行这一次调用`);
+        return 'allowed-once';
+      }
+      if (out === 'rejected') { _reviewRefusedAt = Date.now(); logline('review approval rejected → 冷静期内不再询问'); return 'rejected'; }
+      logline(`review approval outcome=${out} → 静默拒（fail-closed，与无人值守一致）`);
+      return null;
+    } catch (e) {
+      logline(`review approval failed: ${e?.message ?? e} → fail-closed`);
+      return null;
+    }
+  };
+
   // ---------- R / D / S / H / M 总裁决：工具调用前置闸门（waterfall） ----------
   ctx.on('tools/pre-execute', async (exec, next) => {
     channel.callSites.total += 1;
@@ -765,6 +818,26 @@ function apply(ctx) {
         decision = engine.decideToolCall(call);
         logline(`pre-execute ${exec?.name} -> 解冻后重判 ${decision.kind}${decision.law ? '(' + decision.law + ')' : ''} | buffer ${engine.bufferSnapshot().display}`);
       }
+    }
+    // [2026-10-29] review 出口接审批通道：判得出「不确定」，出口不再被压掉。
+    //   只对 review 弹；deny（确定性判决）与破窗态不弹（该静默的仍静默，见 requestReviewVerdict 注释）。
+    //   allowed-once ⇒ 直接放行这一步（动作级，once＝这一次调用）；rejected ⇒ 终局 deny（标注委托人裁决）；
+    //   null ⇒ 落入下方压平分支，与 0.2.14 行为逐位一致（零回归对照）。
+    if (decision.kind === 'review' && !engine.windowBroken) {
+      const verdict = await requestReviewVerdict(exec, decision);
+      if (verdict === 'allowed-once') {
+        // 不进 markBlocked：放行的调用走真执行，回执是真结果，不是"我造成的 error"
+        logline(`pre-execute ${exec?.name} -> review(委托人放行这一次) -> next | whitebox ${JSON.stringify({ ...decision, humanVerdict: 'allowed-once' })}`);
+        return next();
+      }
+      if (verdict === 'rejected') {
+        decision = {
+          ...decision,
+          kind: 'deny',
+          reason: `${decision.reason}\n[委托人裁决] 不同意执行本次调用（approval/asked + approval/decided 审计对留痕，可回放）。`,
+        };
+      }
+      // verdict === null（无服务/异常/无响应）⇒ 静默压平，与 0.2.14 一致
     }
     if (decision.kind === 'deny' || decision.kind === 'review') {
       markBlocked(exec);   // 同上：拦住 ≠ 失败
